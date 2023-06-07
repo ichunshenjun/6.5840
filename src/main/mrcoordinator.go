@@ -22,6 +22,19 @@ func main() {
 
 	m := mr.MakeCoordinator(os.Args[1:], 10)
 	for m.Done() == false {
+		if m.State == mr.MAPING {
+			for i := 0; i < len(m.Maps); i++ {
+				if time.Since(m.Maps[i].Time) > 10 {
+					m.Maps[i].MapState = mr.UNSTART
+				}
+			}
+		} else if m.State == mr.REDUCING {
+			for i := 0; i < len(m.Reduces); i++ {
+				if time.Since(m.Reduces[i].Time) > 10 {
+					m.Reduces[i].ReduceState = mr.UNSTART
+				}
+			}
+		}
 		time.Sleep(time.Second)
 	}
 

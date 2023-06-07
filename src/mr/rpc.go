@@ -6,7 +6,9 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
+import (
+	"os"
+)
 import "strconv"
 
 //
@@ -23,7 +25,20 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+type Args struct {
+	Filenames []string
+	MapNumber int
+}
 
+type Reply struct {
+	NReduce         int
+	State           int
+	Type            int
+	MapFilename     string
+	ReduceFilenames []string
+	MapNumber       int
+	ReduceNumber    int
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
