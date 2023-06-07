@@ -26,8 +26,9 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 type Args struct {
-	Filenames []string
-	MapNumber int
+	Filenames    []string
+	MapNumber    int
+	ReduceNumber int
 }
 
 type Reply struct {
@@ -38,6 +39,7 @@ type Reply struct {
 	ReduceFilenames []string
 	MapNumber       int
 	ReduceNumber    int
+	Valid           int
 }
 
 // Cook up a unique-ish UNIX-domain socket name

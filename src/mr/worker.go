@@ -56,10 +56,16 @@ func Worker(mapf func(string, string) []KeyValue,
 	reply := Reply{}
 	reply.State = 0
 	for reply.State != DONE {
+		args = Args{}
+		reply = Reply{}
+		reply.MapFilename = ""
+		reply.ReduceFilenames = []string{}
+		reply.Valid = 0
+		reply.State = 0
 		ok := call("Coordinator.Do", &args, &reply)
-		if ok {
+		if ok && reply.Valid == 1 {
 			if reply.Type == MAP {
-				//fmt.Printf("%s\n", reply.MapFilename)
+				//fmt.Printf("%d %s\n", reply.MapNumber, reply.MapFilename)
 				type ByKey []KeyValue
 				intermediate := []KeyValue{}
 				file, err := os.Open(reply.MapFilename)
@@ -126,106 +132,12 @@ func Worker(mapf func(string, string) []KeyValue,
 					i = j
 				}
 				ofile.Close()
+				args.ReduceNumber = reply.ReduceNumber
 				_ = call("Coordinator.ReduceDone", &args, &reply)
 			}
 		}
 		time.Sleep(time.Second)
 	}
-
-	//if ok {
-	//	// reply.Y should be 100.
-	//	//fmt.Printf("reply.Y %v\n", reply.Y)
-	//	//
-	//
-	//	// read each input file,
-	//	// pass it to Map,
-	//	// accumulate the intermediate Map output.
-	//	//
-	//	if reply.Type == MAP {
-	//		fmt.Printf("%s\n", reply.MapFilename)
-	//		type ByKey []KeyValue
-	//		intermediate := []KeyValue{}
-	//		file, err := os.Open(reply.MapFilename)
-	//		if err != nil {
-	//			log.Fatalf("cannot open %v", reply.MapFilename)
-	//		}
-	//		content, err := ioutil.ReadAll(file)
-	//		if err != nil {
-	//			log.Fatalf("cannot read %v", reply.MapFilename)
-	//		}
-	//		file.Close()
-	//		kva := mapf(reply.MapFilename, string(content))
-	//		intermediate = append(intermediate, kva...)
-	//		var filePtrs []*os.File
-	//		for i := 0; i < reply.NReduce; i++ {
-	//			oname := fmt.Sprintf("mr-%d-%d.txt", reply.MapNumber, i)
-	//			ofile, _ := ioutil.TempFile("", oname)
-	//			filePtrs = append(filePtrs, ofile)
-	//		}
-	//		for _, kv := range intermediate {
-	//			ReduceNumber := ihash(kv.Key) % reply.NReduce
-	//			//fmt.Printf("%v", oname)
-	//
-	//			enc := json.NewEncoder(filePtrs[ReduceNumber])
-	//			_ = enc.Encode(&kv)
-	//		}
-	//		args = Args{}
-	//		for i := 0; i < len(filePtrs); i++ {
-	//			args.Filenames = append(args.Filenames, filePtrs[i].Name())
-	//		}
-	//		args.MapNumber = reply.MapNumber
-	//
-	//		ok := call("Coordinator.MapDone", &args, &reply)
-	//		if ok {
-	//			reply = Reply{}
-	//			reply.ReduceNumber = -1
-	//			for reply.ReduceNumber != -1 {
-	//				_ = call("Coordinator.ReduceDo", &args, &reply)
-	//				time.Sleep(time.Second)
-	//			}
-	//			if ok {
-	//				if reply.Type == REDUCE {
-	//					for i := 0; i < len(reply.ReduceFilenames); i++ {
-	//						file, _ = os.Open(reply.ReduceFilenames[i])
-	//						dec := json.NewDecoder(file)
-	//						for {
-	//							var kv KeyValue
-	//							if err := dec.Decode(&kv); err != nil {
-	//								break
-	//							}
-	//							kva = append(kva, kv)
-	//						}
-	//						intermediate := []KeyValue{}
-	//						intermediate = append(intermediate, kva...)
-	//						oname := fmt.Sprintf("mr-out-%d", reply.ReduceNumber)
-	//						ofile, _ := os.Create(oname)
-	//						i := 0
-	//						for i < len(intermediate) {
-	//							j := i + 1
-	//							for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-	//								j++
-	//							}
-	//							values := []string{}
-	//							for k := i; k < j; k++ {
-	//								values = append(values, intermediate[k].Value)
-	//							}
-	//							output := reducef(intermediate[i].Key, values)
-	//
-	//							// this is the correct format for each line of Reduce output.
-	//							fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
-	//
-	//							i = j
-	//						}
-	//					}
-	//					_ = call("Coordinator.ReduceDone", &args, &reply)
-	//				}
-	//			}
-	//
-	//		}
-	//	}
-	//} else {
-	//	fmt.Printf("call failed!\n")
-	//}
 }
 
 // example function to show how to make an RPC call to the coordinator.

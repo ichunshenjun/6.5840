@@ -72,6 +72,7 @@ func (c *Coordinator) Do(args *Args, reply *Reply) error {
 	c.Mutex.Lock()
 	if c.State == MAPING {
 		if c.MapNumber < len(c.Files) {
+			//fmt.Printf("mapnumber %d\n", c.MapNumber)
 			var temp = Map{time.Now(), MAP, c.MapNumber, DOING, c.Files[c.MapNumber]}
 			c.Maps = append(c.Maps, temp)
 			reply.MapFilename = temp.filename
@@ -79,16 +80,21 @@ func (c *Coordinator) Do(args *Args, reply *Reply) error {
 			reply.MapNumber = c.MapNumber
 			reply.NReduce = c.NReduce
 			reply.State = c.State
+			reply.Valid = 1
 			c.MapNumber++
 		} else {
 			for index, per_map := range c.Maps {
 				if per_map.MapState == UNSTART {
+					//fmt.Printf("master map %d %s\n", per_map.Number, per_map.filename)
 					c.Maps[index].MapState = DOING
+					c.Maps[index].Time = time.Now()
 					reply.MapFilename = per_map.filename
 					reply.Type = MAP
 					reply.MapNumber = per_map.Number
 					reply.NReduce = c.NReduce
 					reply.State = c.State
+					reply.Valid = 1
+					break
 				}
 			}
 		}
@@ -107,80 +113,28 @@ func (c *Coordinator) Do(args *Args, reply *Reply) error {
 			reply.ReduceNumber = c.ReduceNumber
 			reply.NReduce = c.NReduce
 			reply.State = c.State
+			reply.Valid = 1
 			c.ReduceNumber++
 		} else {
 			for index, per_reduce := range c.Reduces {
 				if per_reduce.ReduceState == UNSTART {
+					//fmt.Printf("Reduce map %d\n", per_reduce.Number)
 					c.Reduces[index].ReduceState = DOING
+					c.Reduces[index].Time = time.Now()
 					reply.ReduceFilenames = per_reduce.filenames
 					reply.Type = REDUCE
 					reply.ReduceNumber = per_reduce.Number
 					reply.NReduce = c.NReduce
 					reply.State = c.State
+					reply.Valid = 1
+					break
 				}
 			}
 		}
+	} else if c.State == DONE {
+		reply.State = c.State
 	}
 	c.Mutex.Unlock()
-	return nil
-}
-
-func (c *Coordinator) ReduceDo(args *Args, reply *Reply) error {
-	fmt.Print("ReduceDo start\n")
-	c.Mutex.Lock()
-	if c.State == REDUCING {
-		if c.ReduceNumber < c.NReduce {
-			var filenames []string
-			for i := 0; i < len(c.InterFilenames); i++ {
-				if c.ReduceNumber == c.InterFilenames[i].ReduceNumber {
-					filenames = append(filenames, c.InterFilenames[i].InterFilename)
-				}
-			}
-			var temp = Reduce{time.Now(), REDUCING, c.ReduceNumber, DOING, filenames}
-			c.Reduces = append(c.Reduces, temp)
-			c.ReduceNumber++
-		} else {
-			for index, per_reduce := range c.Reduces {
-				if per_reduce.ReduceState == UNSTART {
-					c.Reduces[index].ReduceState = DOING
-					reply.ReduceFilenames = per_reduce.filenames
-					reply.Type = REDUCE
-					reply.ReduceNumber = per_reduce.Number
-					reply.NReduce = c.NReduce
-				}
-			}
-		}
-	}
-	c.Mutex.Unlock()
-	return nil
-}
-func (c *Coordinator) MapDo(args *Args, reply *Reply) error {
-	fmt.Print("MapDo start\n")
-	c.Mutex.Lock()
-	fmt.Printf("%v", c.State)
-	if c.State == MAPING {
-		if c.MapNumber < len(c.Files) {
-			var temp = Map{time.Now(), MAP, c.MapNumber, DOING, c.Files[c.MapNumber]}
-			c.Maps = append(c.Maps, temp)
-			reply.MapFilename = temp.filename
-			reply.Type = MAP
-			reply.MapNumber = c.MapNumber
-			reply.NReduce = c.NReduce
-			c.MapNumber++
-		} else {
-			for index, per_map := range c.Maps {
-				if per_map.MapState == UNSTART {
-					c.Maps[index].MapState = DOING
-					reply.MapFilename = per_map.filename
-					reply.Type = MAP
-					reply.MapNumber = per_map.Number
-					reply.NReduce = c.NReduce
-				}
-			}
-		}
-	}
-	c.Mutex.Unlock()
-	fmt.Print("MapDo reply\n")
 	return nil
 }
 
@@ -205,6 +159,7 @@ func (c *Coordinator) Done() bool {
 	ret := false
 	// Your code here.
 	if c.State == DONE {
+		time.Sleep(2 * time.Second)
 		ret = true
 	}
 	c.Mutex.Unlock()
@@ -214,6 +169,7 @@ func (c *Coordinator) Done() bool {
 func (c *Coordinator) MapDone(args *Args, reply *Reply) error {
 	//fmt.Print("MapDone start\n")
 	c.Mutex.Lock()
+	//fmt.Printf("MapDone %d\n", args.MapNumber)
 	for index, filename := range args.Filenames {
 		newfilename := fmt.Sprintf("mr-%d-%d.txt", args.MapNumber, index)
 		os.Rename(filename, newfilename)
@@ -221,11 +177,12 @@ func (c *Coordinator) MapDone(args *Args, reply *Reply) error {
 		//c.Reduces = append(c.Reduces, tmp)
 		tmp := InterFile{newfilename, index}
 		c.InterFilenames = append(c.InterFilenames, tmp)
-		if c.MapDoneNumber == len(c.Files)-1 {
-			c.State = REDUCING
-		}
 	}
+	c.Maps[args.MapNumber].MapState = DONE
 	c.MapDoneNumber++
+	if c.MapDoneNumber == len(c.Files) {
+		c.State = REDUCING
+	}
 	c.Mutex.Unlock()
 	//fmt.Print("MapDone over\n")
 	return nil
@@ -233,6 +190,7 @@ func (c *Coordinator) MapDone(args *Args, reply *Reply) error {
 func (c *Coordinator) ReduceDone(args *Args, reply *Reply) error {
 	//fmt.Print("ReduceDone start\n")
 	c.Mutex.Lock()
+	c.Reduces[args.ReduceNumber].ReduceState = DONE
 	c.ReduceDoneNumber++
 	if c.ReduceDoneNumber == c.NReduce {
 		c.State = DONE

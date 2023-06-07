@@ -74,7 +74,7 @@ rm -f mr-*
 
 failed_any=0
 
-#########################################################
+##########################################################
 # first word-count
 
 # generate the correct output
@@ -112,7 +112,7 @@ fi
 
 # wait for remaining workers and coordinator to exit.
 wait
-
+#exit 1
 #########################################################
 # now indexer
 rm -f mr-*
