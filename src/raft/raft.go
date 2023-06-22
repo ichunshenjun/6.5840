@@ -181,9 +181,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
-		if rf.role == LEADER {
-			DPrintf("发生甚么事了\n")
-		}
+		//if rf.role == LEADER {
+		//	DPrintf("发生甚么事了\n")
+		//}
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -232,13 +232,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	//rf.mu.Lock()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	rf.mu.Lock()
 	if reply.Term > rf.currentTerm {
 		rf.role = FOLLOWER
 		rf.votedFor = -1
 		rf.currentTerm = reply.Term
 		rf.resetElectionTimer()
 	}
-	//rf.mu.Unlock()
+	rf.mu.Unlock()
 	return ok
 }
 
@@ -272,6 +273,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	//rf.mu.Lock()
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	rf.mu.Lock()
 	if reply.VoteGranted {
 		rf.electionNum++
 		DPrintf("当前任期为 %d,我是第 %d 号,我的投票数为 %d\n", rf.currentTerm, rf.me, rf.electionNum)
@@ -285,7 +287,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.matchIndex[i] = 0
 		}
 	}
-	//rf.mu.Unlock()
+	rf.mu.Unlock()
 	return ok
 }
 
