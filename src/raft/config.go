@@ -172,6 +172,7 @@ func (cfg *config) applier(i int, applyCh chan ApplyMsg) {
 			if err_msg != "" {
 				log.Fatalf("apply error: %v", err_msg)
 				cfg.applyErr[i] = err_msg
+
 				// keep reading after error so that Raft doesn't block
 				// holding locks...
 			}
@@ -495,7 +496,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 		cfg.mu.Lock()
 		cmd1, ok := cfg.logs[i][index]
 		cfg.mu.Unlock()
-
+		//DPrintf("现在是第%d号，我的cmd1为%v\n", i, cmd1)
 		if ok {
 			if count > 0 && cmd != cmd1 {
 				cfg.t.Fatalf("committed values do not match: index %v, %v, %v",
@@ -580,8 +581,10 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+				//DPrintf("nd为%d,expected为%d\n", nd, expectedServers)
 				if nd > 0 && nd >= expectedServers {
 					// committed
+					//DPrintf("cmd1:%v,cmd:%v", cmd1, cmd)
 					if cmd1 == cmd {
 						// and it was the command we submitted.
 						return index
