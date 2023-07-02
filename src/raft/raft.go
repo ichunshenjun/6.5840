@@ -304,28 +304,32 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		rf.currentTerm = reply.Term
 		rf.resetElectionTimer()
 		rf.persist()
+		rf.mu.Unlock()
+		return ok
 	}
-	if reply.Success == true {
-		rf.nextIndex[server] = rf.nextIndex[server] + len(args.Entries)
-		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-		//DPrintf("TRUE:我是第%d号，nextIndex为%d", rf.me, rf.nextIndex[server])
-		//DPrintf("nextIndex为%d", rf.nextIndex[server])
-		//DPrintf("nextIndex为%d,日志长度为%d", rf.nextIndex[server], len(args.Entries))
-	}
-	//if reply.Success == false && rf.nextIndex[server] > 1 {
-	//	rf.nextIndex[server]--
-	//}
-	if reply.Success == false && rf.nextIndex[server] > 1 {
-		if reply.XTerm == -1 {
-			rf.nextIndex[server] = reply.XLen
-		} else {
-			lastLogIndex := rf.findLastLogInTerm(reply.XTerm)
-			//DPrintf("lastLogIndex为%d,reply的XIndex为%d", lastLogIndex, reply.XIndex)
-			if lastLogIndex > 0 {
-				rf.nextIndex[server] = lastLogIndex
+	if args.Term == rf.currentTerm {
+		if reply.Success == true {
+			rf.nextIndex[server] = rf.nextIndex[server] + len(args.Entries)
+			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+			//DPrintf("TRUE:我是第%d号，nextIndex为%d", rf.me, rf.nextIndex[server])
+			//DPrintf("nextIndex为%d", rf.nextIndex[server])
+			//DPrintf("nextIndex为%d,日志长度为%d", rf.nextIndex[server], len(args.Entries))
+		}
+		//if reply.Success == false && rf.nextIndex[server] > 1 {
+		//	rf.nextIndex[server]--
+		//}
+		if reply.Success == false && rf.nextIndex[server] > 1 {
+			if reply.XTerm == -1 {
+				rf.nextIndex[server] = reply.XLen
 			} else {
-				rf.nextIndex[server] = max(1, reply.XIndex)
-				//DPrintf("FALSE:我是第%d号，lastLogIndex为%d,nextIndex为%d", rf.me, lastLogIndex, rf.nextIndex[server])
+				lastLogIndex := rf.findLastLogInTerm(reply.XTerm)
+				//DPrintf("lastLogIndex为%d,reply的XIndex为%d", lastLogIndex, reply.XIndex)
+				if lastLogIndex > 0 {
+					rf.nextIndex[server] = lastLogIndex
+				} else {
+					rf.nextIndex[server] = max(1, reply.XIndex)
+					//DPrintf("FALSE:我是第%d号，lastLogIndex为%d,nextIndex为%d", rf.me, lastLogIndex, rf.nextIndex[server])
+				}
 			}
 		}
 	}
@@ -386,23 +390,48 @@ func (rf *Raft) commitCheck() {
 	for {
 		rf.mu.Lock()
 		if rf.role == LEADER {
-			apply := 1
-			for i := 0; i < len(rf.peers); i++ {
-				if rf.me == i {
+			//DPrintf("我是第%d号，我的commit为%d，我的日志长度为%d", rf.me, rf.commitIndex, rf)
+			for n := rf.commitIndex + 1; n <= rf.log[len(rf.log)-1].LogIndex; n++ {
+				if rf.log[n].CurrentTerm != rf.currentTerm {
 					continue
 				}
-				if rf.matchIndex[i] >= rf.commitIndex+1 {
-					apply++
+				apply := 1
+				for i := 0; i < len(rf.peers); i++ {
+					if rf.me == i {
+						continue
+					}
+					if rf.matchIndex[i] >= rf.commitIndex+1 {
+						apply++
+					}
+					if apply > len(rf.peers)/2 {
+						rf.commitIndex = n
+					}
+					if rf.commitIndex > rf.lastApplied {
+						rf.lastApplied++
+						msg := ApplyMsg{CommandValid: true, Command: rf.log[rf.lastApplied].Context, CommandIndex: rf.lastApplied}
+						rf.applyCh <- msg
+						break
+					}
 				}
 			}
-			if apply > len(rf.peers)/2 {
-				rf.commitIndex = rf.commitIndex + 1
-			}
-			if rf.commitIndex > rf.lastApplied {
-				rf.lastApplied++
-				msg := ApplyMsg{CommandValid: true, Command: rf.log[rf.lastApplied].Context, CommandIndex: rf.lastApplied}
-				rf.applyCh <- msg
-			}
+
+			//apply := 1
+			//for i := 0; i < len(rf.peers); i++ {
+			//	if rf.me == i {
+			//		continue
+			//	}
+			//	if rf.matchIndex[i] >= rf.commitIndex+1 {
+			//		apply++
+			//	}
+			//}
+			//if apply > len(rf.peers)/2 {
+			//	rf.commitIndex = rf.commitIndex + 1
+			//}
+			//if rf.commitIndex > rf.lastApplied {
+			//	rf.lastApplied++
+			//	msg := ApplyMsg{CommandValid: true, Command: rf.log[rf.lastApplied].Context, CommandIndex: rf.lastApplied}
+			//	rf.applyCh <- msg
+			//}
 		}
 		rf.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
@@ -435,7 +464,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.log = append(rf.log, Log{command, rf.currentTerm, index})
 	rf.persist()
-	//DPrintf("我是第%d号,添加log %d,任期为%d,内容为%v\n", rf.me, index, rf.currentTerm, command)
+	DPrintf("我是第%d号,添加log %d,任期为%d,内容为%v\n", rf.me, index, rf.currentTerm, command)
 	return index, term, isLeader
 }
 
