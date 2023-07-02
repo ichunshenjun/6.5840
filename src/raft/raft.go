@@ -77,6 +77,7 @@ type Raft struct {
 	electionTime time.Time
 	electionNum  int
 	applyCh      chan ApplyMsg
+	applyCond    *sync.Cond
 }
 type Log struct {
 	Context     interface{}
@@ -262,13 +263,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//DPrintf("我是第%d号，我已同步\n", rf.me)
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.log[len(rf.log)-1].LogIndex)
+		rf.applyCond.Broadcast()
 	}
-	if rf.commitIndex > rf.lastApplied {
-		rf.lastApplied++
-		msg := ApplyMsg{CommandValid: true, Command: rf.log[rf.lastApplied].Context, CommandIndex: rf.lastApplied}
-		//DPrintf("提交%d的log\n", rf.commitIndex)
-		rf.applyCh <- msg
-	}
+	//if rf.commitIndex > rf.lastApplied {
+	//	rf.lastApplied++
+	//	msg := ApplyMsg{CommandValid: true, Command: rf.log[rf.lastApplied].Context, CommandIndex: rf.lastApplied}
+	//	//DPrintf("提交%d的log\n", rf.commitIndex)
+	//	rf.applyCh <- msg
+	//}
 	//if rf.role == LEADER {
 	//	DPrintf("当前任期为%d,我是第 %d号，我再也不是leader了\n", rf.currentTerm, rf.me)
 	//}
@@ -290,6 +292,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.role = FOLLOWER
 		rf.votedFor = -1
 		rf.persist()
+		//return
 	}
 	//DPrintf("候选人最高任期为%d,本地任期为%d\n", args.LastLogTerm, rf.log[len(rf.log)-1].CurrentTerm)
 	//DPrintf("候选人日志索引为%d,本地日志索引为%d\n", args.LastLogIndex, rf.log[len(rf.log)-1].LogIndex)
@@ -307,8 +310,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
-	rf.votedFor = -1
-	rf.persist()
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -317,6 +318,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	rf.mu.Lock()
 	if reply.Term > rf.currentTerm {
 		rf.role = FOLLOWER
+		rf.electionNum = 0
 		rf.votedFor = -1
 		rf.currentTerm = reply.Term
 		rf.resetElectionTimer()
@@ -401,6 +403,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		rf.mu.Unlock()
 		return ok
 	}
+	//if !reply.VoteGranted {
+	//	rf.mu.Unlock()
+	//	return ok
+	//}
 	if args.Term == rf.currentTerm {
 		if reply.VoteGranted {
 			rf.electionNum++
@@ -410,6 +416,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			//DPrintf("我是第 %d号，我的任期为%d,我成为leader\n", rf.me, rf.currentTerm)
 			rf.role = LEADER
 			rf.resetElectionTimer()
+			rf.electionNum = 0
 			for i, _ := range rf.peers {
 				rf.nextIndex[i] = rf.log[len(rf.log)-1].LogIndex + 1
 				rf.matchIndex[i] = 0
@@ -420,7 +427,22 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	rf.mu.Unlock()
 	return ok
 }
-
+func (rf *Raft) applier() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for !rf.killed() {
+		if rf.commitIndex > rf.lastApplied {
+			rf.lastApplied++
+			msg := ApplyMsg{CommandValid: true, Command: rf.log[rf.lastApplied].Context, CommandIndex: rf.lastApplied}
+			rf.mu.Unlock()
+			rf.applyCh <- msg
+			rf.mu.Lock()
+			//DPrintf("我是第%d号,我的任期是%d,我提交了日志%d,内容是%v", rf.me, rf.currentTerm, rf.lastApplied, rf.log[rf.lastApplied].Context)
+		} else {
+			rf.applyCond.Wait()
+		}
+	}
+}
 func (rf *Raft) commitCheck() {
 	for {
 		rf.mu.Lock()
@@ -435,16 +457,12 @@ func (rf *Raft) commitCheck() {
 					if rf.me == i {
 						continue
 					}
-					if rf.matchIndex[i] >= rf.commitIndex+1 {
+					if rf.matchIndex[i] >= n {
 						apply++
 					}
 					if apply > len(rf.peers)/2 {
 						rf.commitIndex = n
-					}
-					if rf.commitIndex > rf.lastApplied {
-						rf.lastApplied++
-						msg := ApplyMsg{CommandValid: true, Command: rf.log[rf.lastApplied].Context, CommandIndex: rf.lastApplied}
-						rf.applyCh <- msg
+						rf.applyCond.Broadcast()
 						break
 					}
 				}
@@ -499,7 +517,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.log = append(rf.log, Log{command, rf.currentTerm, index})
 	rf.persist()
-	DPrintf("我是第%d号,添加log %d,任期为%d,内容为%v\n", rf.me, index, rf.currentTerm, command)
+	//DPrintf("我是第%d号,添加log %d,任期为%d,内容为%v\n", rf.me, index, rf.currentTerm, command)
 	return index, term, isLeader
 }
 
@@ -612,6 +630,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.applyCh = applyCh
+	rf.applyCond = sync.NewCond(&rf.mu)
 	for i := 0; i < len(rf.nextIndex); i++ {
 		rf.nextIndex[i] = 1
 	}
@@ -631,6 +650,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.applier()
 
 	return rf
 }
