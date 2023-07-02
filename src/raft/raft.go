@@ -179,11 +179,23 @@ type AppendEntriesArgs struct {
 }
 type AppendEntriesReply struct {
 	Term    int
-	Index   int
-	Len     int
+	XTerm   int
+	XIndex  int
+	XLen    int
 	Success bool
 }
 
+func (rf *Raft) findLastLogInTerm(XTerm int) int {
+	for i := rf.log[len(rf.log)-1].LogIndex; i > 0; i-- {
+		term := rf.log[i].CurrentTerm
+		if term == XTerm {
+			return i
+		} else if term < XTerm {
+			break
+		}
+	}
+	return -1
+}
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -203,16 +215,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.currentTerm = args.Term
 	rf.persist()
-	reply.Success = true
 	if args.PrevLogIndex > len(rf.log)-1 {
+		reply.XTerm = -1
+		reply.XIndex = -1
+		reply.XLen = len(rf.log)
 		reply.Success = false
 		return
 	}
 	//DPrintf("我是第%d号,上一条日志任期为%d", rf.me, args.PrevLogTerm)
 	if rf.log[args.PrevLogIndex].CurrentTerm != args.PrevLogTerm {
+		reply.XTerm = args.PrevLogTerm
+		for index := args.PrevLogIndex; index > 0; index-- {
+			if rf.log[index-1].CurrentTerm != reply.XTerm {
+				reply.XIndex = index
+				break
+			}
+		}
+		reply.XLen = len(rf.log)
 		reply.Success = false
 		return
 	}
+	reply.Success = true
 	rf.log = rf.log[:args.PrevLogIndex+1]
 	rf.log = append(rf.log, args.Entries...)
 	rf.persist()
@@ -285,9 +308,26 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	if reply.Success == true {
 		rf.nextIndex[server] = rf.nextIndex[server] + len(args.Entries)
 		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+		//DPrintf("TRUE:我是第%d号，nextIndex为%d", rf.me, rf.nextIndex[server])
+		//DPrintf("nextIndex为%d", rf.nextIndex[server])
+		//DPrintf("nextIndex为%d,日志长度为%d", rf.nextIndex[server], len(args.Entries))
 	}
+	//if reply.Success == false && rf.nextIndex[server] > 1 {
+	//	rf.nextIndex[server]--
+	//}
 	if reply.Success == false && rf.nextIndex[server] > 1 {
-		rf.nextIndex[server]--
+		if reply.XTerm == -1 {
+			rf.nextIndex[server] = reply.XLen
+		} else {
+			lastLogIndex := rf.findLastLogInTerm(reply.XTerm)
+			//DPrintf("lastLogIndex为%d,reply的XIndex为%d", lastLogIndex, reply.XIndex)
+			if lastLogIndex > 0 {
+				rf.nextIndex[server] = lastLogIndex
+			} else {
+				rf.nextIndex[server] = max(1, reply.XIndex)
+				//DPrintf("FALSE:我是第%d号，lastLogIndex为%d,nextIndex为%d", rf.me, lastLogIndex, rf.nextIndex[server])
+			}
+		}
 	}
 	rf.mu.Unlock()
 	return ok
