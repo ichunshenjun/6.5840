@@ -208,17 +208,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
-	rf.role = FOLLOWER
-	rf.resetElectionTimer()
 	if args.Term > rf.currentTerm {
 		rf.votedFor = -1
 		rf.currentTerm = args.Term
+		rf.role = FOLLOWER
 		rf.persist()
 	}
 	//DPrintf("我是第%d号,entries长度为%d", rf.me, len(args.Entries))
 	//if len(args.Entries) == 0 {
 	//	return
 	//}
+	rf.role = FOLLOWER
+	rf.resetElectionTimer()
 	reply.Term = rf.currentTerm
 	if args.PrevLogIndex > len(rf.log)-1 {
 		reply.XTerm = -1
@@ -227,9 +228,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
-	//DPrintf("我是第%d号,上一条日志任期为%d", rf.me, args.PrevLogTerm)
 	if rf.log[args.PrevLogIndex].CurrentTerm != args.PrevLogTerm {
-		reply.XTerm = args.PrevLogTerm
+		//DPrintf("我是第%d号,参数日志任期为%d,我对应的日志任期为%d,最后一条日志任期为%d", rf.me, args.PrevLogTerm, rf.log[args.PrevLogIndex].CurrentTerm, rf.log[len(rf.log)-1].CurrentTerm)
+		reply.XTerm = rf.log[args.PrevLogIndex].CurrentTerm
 		for index := args.PrevLogIndex; index > 0; index-- {
 			if rf.log[index-1].CurrentTerm != reply.XTerm {
 				reply.XIndex = index
@@ -315,47 +316,55 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	//rf.mu.Lock()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	rf.mu.Lock()
-	if reply.Term > rf.currentTerm {
-		rf.role = FOLLOWER
-		rf.electionNum = 0
-		rf.votedFor = -1
-		rf.currentTerm = reply.Term
-		rf.resetElectionTimer()
-		rf.persist()
-		rf.mu.Unlock()
-		return ok
-	}
-	if reply.Term < rf.currentTerm {
-		rf.mu.Unlock()
-		return ok
-	}
-	if reply.Success == true {
-		rf.nextIndex[server] = rf.nextIndex[server] + len(args.Entries)
-		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-		//DPrintf("TRUE:我是第%d号，nextIndex为%d", rf.me, rf.nextIndex[server])
-		//DPrintf("nextIndex为%d", rf.nextIndex[server])
-		//DPrintf("nextIndex为%d,日志长度为%d", rf.nextIndex[server], len(args.Entries))
-	}
-	//if reply.Success == false && rf.nextIndex[server] > 1 {
-	//	rf.nextIndex[server]--
-	//}
-	if reply.Success == false && rf.nextIndex[server] > 1 {
-		if reply.XTerm == -1 {
-			rf.nextIndex[server] = reply.XLen
-		} else {
-			lastLogIndex := rf.findLastLogInTerm(reply.XTerm)
-			//DPrintf("lastLogIndex为%d,reply的XIndex为%d", lastLogIndex, reply.XIndex)
-			if lastLogIndex > 0 {
-				rf.nextIndex[server] = lastLogIndex
-			} else {
-				rf.nextIndex[server] = max(1, reply.XIndex)
-				//DPrintf("FALSE:我是第%d号，lastLogIndex为%d,nextIndex为%d", rf.me, lastLogIndex, rf.nextIndex[server])
+	if ok {
+		rf.mu.Lock()
+		if reply.Term > rf.currentTerm {
+			rf.role = FOLLOWER
+			rf.electionNum = 0
+			rf.votedFor = -1
+			rf.currentTerm = reply.Term
+			//rf.resetElectionTimer()
+			rf.persist()
+			rf.mu.Unlock()
+			return ok
+		}
+		if reply.Term < rf.currentTerm {
+			rf.mu.Unlock()
+			return ok
+		}
+		if args.Term == rf.currentTerm {
+			if reply.Success == true {
+				//rf.nextIndex[server] = rf.nextIndex[server] + len(args.Entries)
+				rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+				rf.nextIndex[server] = rf.matchIndex[server] + 1
+				//rf.nextIndex[server] = rf.matchIndex[server] + 1
+				//DPrintf("TRUE:我是第%d号，nextIndex为%d", rf.me, rf.nextIndex[server])
+				//DPrintf("nextIndex为%d", rf.nextIndex[server])
+				//DPrintf("nextIndex为%d,matchIndex为%d,日志长度为%d", rf.nextIndex[server], rf.matchIndex[server], len(rf.log))
+			}
+			//if reply.Success == false && rf.nextIndex[server] > 1 {
+			//	rf.nextIndex[server]--
+			//}
+			if reply.Success == false && rf.nextIndex[server] > 1 {
+				if reply.XTerm == -1 {
+					rf.nextIndex[server] = reply.XLen
+					//DPrintf("FALSE:我是第%d号，我的日志长度为%d,nextIndex为%d", rf.me, len(rf.log), rf.nextIndex[server])
+				} else {
+					lastLogIndex := rf.findLastLogInTerm(reply.XTerm)
+					//DPrintf("lastLogIndex为%d,reply的XIndex为%d,reply的任期为%d", lastLogIndex, reply.XIndex, reply.XTerm)
+					if lastLogIndex > 0 {
+						rf.nextIndex[server] = lastLogIndex
+						//DPrintf("FALSE:我是第%d号，我的日志长度为%d,nextIndex为%d", rf.me, len(rf.log), rf.nextIndex[server])
+					} else {
+						rf.nextIndex[server] = max(1, reply.XIndex)
+						//DPrintf("FALSE:我是第%d号，我的日志长度为%d,nextIndex为%d", rf.me, len(rf.log), rf.nextIndex[server])
+					}
+				}
+				//DPrintf("FALSE:我是第%d号，我的日志长度为%d,nextIndex为%d", rf.me, len(rf.log), rf.nextIndex[server])
 			}
 		}
+		rf.mu.Unlock()
 	}
-
-	rf.mu.Unlock()
 	return ok
 }
 
@@ -389,42 +398,44 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	//rf.mu.Lock()
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	rf.mu.Lock()
-	if reply.Term > args.Term {
-		rf.role = FOLLOWER
-		rf.votedFor = -1
-		rf.currentTerm = reply.Term
-		rf.resetElectionTimer()
-		rf.persist()
-		rf.mu.Unlock()
-		return ok
-	}
-	if reply.Term < args.Term {
-		rf.mu.Unlock()
-		return ok
-	}
-	//if !reply.VoteGranted {
-	//	rf.mu.Unlock()
-	//	return ok
-	//}
-	if args.Term == rf.currentTerm {
-		if reply.VoteGranted {
-			rf.electionNum++
-			//DPrintf("当前任期为 %d,我是第 %d 号,我的投票数为 %d\n", rf.currentTerm, rf.me, rf.electionNum)
+	if ok {
+		rf.mu.Lock()
+		if reply.Term > args.Term {
+			rf.role = FOLLOWER
+			rf.votedFor = -1
+			rf.currentTerm = reply.Term
+			//rf.resetElectionTimer()
+			rf.persist()
+			rf.mu.Unlock()
+			return ok
 		}
-		if rf.electionNum > len(rf.peers)/2 && rf.role == CANDIDATE {
-			//DPrintf("我是第 %d号，我的任期为%d,我成为leader\n", rf.me, rf.currentTerm)
-			rf.role = LEADER
-			rf.resetElectionTimer()
-			rf.electionNum = 0
-			for i, _ := range rf.peers {
-				rf.nextIndex[i] = rf.log[len(rf.log)-1].LogIndex + 1
-				rf.matchIndex[i] = 0
+		if reply.Term < args.Term {
+			rf.mu.Unlock()
+			return ok
+		}
+		//if !reply.VoteGranted {
+		//	rf.mu.Unlock()
+		//	return ok
+		//}
+		if args.Term == rf.currentTerm && rf.role == CANDIDATE {
+			if reply.VoteGranted {
+				rf.electionNum++
+				//DPrintf("当前任期为 %d,我是第 %d 号,我的投票数为 %d\n", rf.currentTerm, rf.me, rf.electionNum)
 			}
-			go rf.commitCheck()
+			if rf.electionNum > len(rf.peers)/2 && rf.role == CANDIDATE {
+				//DPrintf("我是第 %d号，我的任期为%d,我成为leader\n", rf.me, rf.currentTerm)
+				rf.role = LEADER
+				rf.resetElectionTimer()
+				rf.electionNum = 0
+				for i, _ := range rf.peers {
+					rf.nextIndex[i] = rf.log[len(rf.log)-1].LogIndex + 1
+					rf.matchIndex[i] = 0
+				}
+				go rf.commitCheck()
+			}
 		}
+		rf.mu.Unlock()
 	}
-	rf.mu.Unlock()
 	return ok
 }
 func (rf *Raft) applier() {
@@ -444,7 +455,7 @@ func (rf *Raft) applier() {
 	}
 }
 func (rf *Raft) commitCheck() {
-	for {
+	for rf.killed() == false {
 		rf.mu.Lock()
 		if rf.role == LEADER {
 			//DPrintf("我是第%d号，我的commit为%d，我的日志长度为%d", rf.me, rf.commitIndex, rf)
@@ -560,6 +571,7 @@ func (rf *Raft) ticker() {
 					continue
 				}
 				nextIndex := rf.nextIndex[index]
+				//DPrintf("我是第%d号,nextIndex-1为%d", rf.me, nextIndex-1)
 				prevlog := rf.log[nextIndex-1]
 				args := AppendEntriesArgs{rf.currentTerm, rf.me, prevlog.LogIndex, prevlog.CurrentTerm, make([]Log, rf.log[len(rf.log)-1].LogIndex-rf.nextIndex[index]+1), rf.commitIndex, true}
 				//DPrintf("我是第%d号,entries的长度为%d,%d,%d", rf.me, len(args.Entries), rf.log[len(rf.log)-1].LogIndex, rf.nextIndex[index])
