@@ -78,6 +78,9 @@ type Raft struct {
 	electionNum  int
 	applyCh      chan ApplyMsg
 	applyCond    *sync.Cond
+
+	lastIncludedIndex int
+	lastIncludedTerm  int
 }
 type Log struct {
 	Context     interface{}
@@ -148,7 +151,19 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if index <= rf.lastIncludedIndex {
+		return
+	}
+	for cutIndex, log := range rf.log {
+		if log.LogIndex == index {
+			rf.lastIncludedIndex = index
+			rf.lastIncludedTerm = log.CurrentTerm
+			rf.log = rf.log[cutIndex+1:]
+			rf.log = append([]Log{{-1, 0, 0}}, rf.log...)
+		}
+	}
 }
 
 // example RequestVote RPC arguments structure.
@@ -243,8 +258,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	reply.Success = true
 	for idx, entry := range args.Entries {
-		if entry.LogIndex <= rf.log[len(rf.log)-1].LogIndex && rf.log[entry.LogIndex].CurrentTerm != entry.CurrentTerm {
-			rf.log = rf.log[:entry.LogIndex]
+		if entry.LogIndex <= rf.log[len(rf.log)-1].LogIndex && rf.log[entry.LogIndex-rf.lastIncludedIndex].CurrentTerm != entry.CurrentTerm {
+			rf.log = rf.log[:(entry.LogIndex - rf.lastIncludedIndex)]
 			rf.persist()
 		}
 		if entry.LogIndex > rf.log[len(rf.log)-1].LogIndex {
