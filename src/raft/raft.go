@@ -88,6 +88,18 @@ type Log struct {
 	LogIndex    int
 }
 
+type InstallSnapshotArgs struct {
+	Term             int
+	LeaderId         int
+	LastIncludeIndex int
+	LastIncludeTerm  int
+	Data             []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -162,8 +174,11 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 			rf.lastIncludedTerm = log.CurrentTerm
 			rf.log = rf.log[cutIndex+1:]
 			rf.log = append([]Log{{-1, 0, 0}}, rf.log...)
+			//rf.lastApplied = rf.lastIncludedIndex
+			rf.persist()
 		}
 	}
+	DPrintf("发生甚么事了index为%d\n", index)
 }
 
 // example RequestVote RPC arguments structure.
@@ -236,14 +251,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.role = FOLLOWER
 	rf.resetElectionTimer()
 	reply.Term = rf.currentTerm
-	if args.PrevLogIndex > len(rf.log)-1 {
+	if args.PrevLogIndex > rf.log[len(rf.log)-1].LogIndex {
 		reply.XTerm = -1
 		reply.XIndex = -1
 		reply.XLen = len(rf.log)
 		reply.Success = false
 		return
 	}
-	if rf.log[args.PrevLogIndex].CurrentTerm != args.PrevLogTerm {
+	if rf.log[args.PrevLogIndex-rf.lastIncludedIndex].CurrentTerm != args.PrevLogTerm {
 		//DPrintf("我是第%d号,参数日志任期为%d,我对应的日志任期为%d,最后一条日志任期为%d", rf.me, args.PrevLogTerm, rf.log[args.PrevLogIndex].CurrentTerm, rf.log[len(rf.log)-1].CurrentTerm)
 		reply.XTerm = rf.log[args.PrevLogIndex].CurrentTerm
 		for index := args.PrevLogIndex; index > 0; index-- {
@@ -459,7 +474,7 @@ func (rf *Raft) applier() {
 	for !rf.killed() {
 		if rf.commitIndex > rf.lastApplied {
 			rf.lastApplied++
-			msg := ApplyMsg{CommandValid: true, Command: rf.log[rf.lastApplied].Context, CommandIndex: rf.lastApplied}
+			msg := ApplyMsg{CommandValid: true, Command: rf.log[rf.lastApplied-rf.lastIncludedIndex].Context, CommandIndex: rf.lastApplied}
 			rf.mu.Unlock()
 			rf.applyCh <- msg
 			rf.mu.Lock()
@@ -475,7 +490,7 @@ func (rf *Raft) commitCheck() {
 		if rf.role == LEADER {
 			//DPrintf("我是第%d号，我的commit为%d，我的日志长度为%d", rf.me, rf.commitIndex, rf)
 			for n := rf.commitIndex + 1; n <= rf.log[len(rf.log)-1].LogIndex; n++ {
-				if rf.log[n].CurrentTerm != rf.currentTerm {
+				if rf.log[n-rf.lastIncludedIndex].CurrentTerm != rf.currentTerm {
 					continue
 				}
 				apply := 1
@@ -571,6 +586,9 @@ func (rf *Raft) resetElectionTimer() {
 	rf.electionTime = t.Add(time.Duration(150+rand.Intn(150)) * time.Millisecond)
 }
 
+func (rf *Raft) InstallSnapShot(server int) {
+
+}
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
@@ -587,12 +605,17 @@ func (rf *Raft) ticker() {
 				}
 				nextIndex := rf.nextIndex[index]
 				//DPrintf("我是第%d号,nextIndex-1为%d", rf.me, nextIndex-1)
-				prevlog := rf.log[nextIndex-1]
+				prevlog := rf.log[nextIndex-1-rf.lastIncludedIndex]
+				DPrintf("我是第%d号,rf.log[len(rf.log)-1].LogIndex为%d,rf.nextIndex[index]为%d", rf.me, rf.log[len(rf.log)-1].LogIndex, rf.nextIndex[index])
+				if rf.nextIndex[index] <= rf.lastIncludedIndex {
+					go rf.InstallSnapShot(index)
+					continue
+				}
 				args := AppendEntriesArgs{rf.currentTerm, rf.me, prevlog.LogIndex, prevlog.CurrentTerm, make([]Log, rf.log[len(rf.log)-1].LogIndex-rf.nextIndex[index]+1), rf.commitIndex, true}
 				//DPrintf("我是第%d号,entries的长度为%d,%d,%d", rf.me, len(args.Entries), rf.log[len(rf.log)-1].LogIndex, rf.nextIndex[index])
 				//args := AppendEntriesArgs{rf.currentTerm, rf.me, prevlog.LogIndex, prevlog.CurrentTerm, make([]Log, 0), rf.commitIndex, true}
 				reply := AppendEntriesReply{}
-				copy(args.Entries, rf.log[rf.nextIndex[index]:])
+				copy(args.Entries, rf.log[(rf.nextIndex[index]-rf.lastIncludedIndex):])
 				//DPrintf("拷贝的log为%d\n", rf.nextIndex[index])
 				go rf.sendAppendEntries(index, &args, &reply)
 			}
@@ -665,6 +688,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	for i := 1; i < len(rf.matchIndex); i++ {
 		rf.matchIndex[i] = 0
 	}
+	rf.lastIncludedIndex = 0
 	rf.currentTerm = 0
 	rf.electionNum = 0
 	rf.resetElectionTimer()
