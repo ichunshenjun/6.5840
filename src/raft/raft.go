@@ -187,7 +187,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 			if index > rf.lastApplied {
 				rf.lastApplied = index
 			}
-			DPrintf("我给人砍了，cutIndex+1为%d", cutIndex+1)
+			DPrintf("我是第%d号，我给人砍了，最后一个log索引为%d,index为%d", rf.me, rf.log[len(rf.log)-1].LogIndex, index)
 			rf.persister.Save(rf.persister.raftstate, snapshot)
 		}
 	}
@@ -273,9 +273,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	if rf.log[args.PrevLogIndex-rf.lastIncludedIndex].CurrentTerm != args.PrevLogTerm {
 		//DPrintf("我是第%d号,参数日志任期为%d,我对应的日志任期为%d,最后一条日志任期为%d", rf.me, args.PrevLogTerm, rf.log[args.PrevLogIndex].CurrentTerm, rf.log[len(rf.log)-1].CurrentTerm)
-		reply.XTerm = rf.log[args.PrevLogIndex].CurrentTerm
+		reply.XTerm = rf.log[args.PrevLogIndex-rf.lastIncludedIndex].CurrentTerm
 		for index := args.PrevLogIndex; index > 0; index-- {
-			if rf.log[index-1].CurrentTerm != reply.XTerm {
+			if rf.log[index-1-rf.lastIncludedIndex].CurrentTerm != reply.XTerm {
 				reply.XIndex = index
 				break
 			}
@@ -629,9 +629,9 @@ func (rf *Raft) sendInstallSnapShot(server int, args *InstallSnapshotArgs, reply
 }
 func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
+		rf.mu.Unlock()
 		return
 	}
 	if args.Term > rf.currentTerm {
@@ -644,6 +644,7 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.resetElectionTimer()
 	reply.Term = rf.currentTerm
 	if rf.lastIncludedIndex >= args.LastIncludeIndex {
+		rf.mu.Unlock()
 		return
 	}
 	index := args.LastIncludeIndex
@@ -682,16 +683,24 @@ func (rf *Raft) ticker() {
 				}
 				nextIndex := rf.nextIndex[index]
 				//DPrintf("我是第%d号,nextIndex-1为%d", rf.me, nextIndex-1)
-				prevlog := rf.log[nextIndex-1-rf.lastIncludedIndex]
-				DPrintf("我是第%d号,rf.log[len(rf.log)-1].LogIndex为%d,rf.nextIndex[index]为%d,rf.lastIncludedIndex为%d", rf.me, rf.log[len(rf.log)-1].LogIndex, rf.nextIndex[index], rf.lastIncludedIndex)
+				//DPrintf("我是第%d号,rf.log[len(rf.log)-1].LogIndex为%d,rf.nextIndex[index]为%d,rf.lastIncludedIndex为%d", rf.me, rf.log[len(rf.log)-1].LogIndex, rf.nextIndex[index], rf.lastIncludedIndex)
 				if rf.nextIndex[index] <= rf.lastIncludedIndex {
-					DPrintf("wuhu")
+					//DPrintf("wuhu")
 					args := InstallSnapshotArgs{rf.currentTerm, rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, rf.persister.ReadSnapshot()}
 					reply := InstallSnapshotReply{}
 					go rf.sendInstallSnapShot(index, &args, &reply)
 					continue
 				}
-				args := AppendEntriesArgs{rf.currentTerm, rf.me, prevlog.LogIndex, prevlog.CurrentTerm, make([]Log, rf.log[len(rf.log)-1].LogIndex-rf.nextIndex[index]+1), rf.commitIndex, true}
+				lastLogIndex := rf.log[len(rf.log)-1].LogIndex
+				prevlog := rf.log[nextIndex-1-rf.lastIncludedIndex]
+				prevLogIndex := prevlog.LogIndex
+				prevLogTerm := prevlog.CurrentTerm
+				if rf.nextIndex[index]-1 == rf.lastIncludedIndex && rf.lastIncludedIndex != 0 {
+					lastLogIndex = rf.lastIncludedIndex
+					prevLogIndex = rf.lastIncludedIndex
+					prevLogTerm = rf.lastIncludedTerm
+				}
+				args := AppendEntriesArgs{rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, make([]Log, lastLogIndex-rf.nextIndex[index]+1), rf.commitIndex, true}
 				//DPrintf("我是第%d号,entries的长度为%d,%d,%d", rf.me, len(args.Entries), rf.log[len(rf.log)-1].LogIndex, rf.nextIndex[index])
 				//args := AppendEntriesArgs{rf.currentTerm, rf.me, prevlog.LogIndex, prevlog.CurrentTerm, make([]Log, 0), rf.commitIndex, true}
 				reply := AppendEntriesReply{}
