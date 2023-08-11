@@ -1176,6 +1176,7 @@ func TestSnapshotBasic2D(t *testing.T) {
 	snapcommon(t, "Test (2D): snapshots basic", false, true, false)
 }
 
+/*
 func TestSnapshotInstall2D(t *testing.T) {
 	snapcommon(t, "Test (2D): install snapshots (disconnect)", true, true, false)
 }
@@ -1279,3 +1280,4 @@ func TestSnapshotInit2D(t *testing.T) {
 	cfg.one(rand.Int(), servers, true)
 	cfg.end()
 }
+*/

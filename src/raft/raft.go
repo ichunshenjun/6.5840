@@ -133,7 +133,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.lastIncludedIndex)
 	e.Encode(rf.lastIncludedTerm)
 	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
+	rf.persister.Save(raftstate, rf.persister.snapshot)
 }
 
 // restore previously persisted state.
@@ -171,7 +171,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if index <= rf.lastIncludedIndex {
+	if index <= rf.lastIncludedIndex || index > rf.commitIndex {
 		return
 	}
 	for cutIndex, log := range rf.log {
@@ -180,15 +180,22 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 			rf.lastIncludedTerm = log.CurrentTerm
 			rf.log = rf.log[cutIndex+1:]
 			rf.log = append([]Log{{-1, 0, 0}}, rf.log...)
-			rf.persist()
-			if index > rf.commitIndex {
-				rf.commitIndex = index
-			}
-			if index > rf.lastApplied {
-				rf.lastApplied = index
-			}
+			//if index > rf.commitIndex {
+			//	rf.commitIndex = index
+			//}
+			//if index > rf.lastApplied {
+			//	rf.lastApplied = index
+			//}
 			DPrintf("我是第%d号，我给人砍了，最后一个log索引为%d,index为%d", rf.me, rf.log[len(rf.log)-1].LogIndex, index)
-			rf.persister.Save(rf.persister.raftstate, snapshot)
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+			e.Encode(rf.votedFor)
+			e.Encode(rf.currentTerm)
+			e.Encode(rf.log)
+			e.Encode(rf.lastIncludedIndex)
+			e.Encode(rf.lastIncludedTerm)
+			raftstate := w.Bytes()
+			rf.persister.Save(raftstate, snapshot)
 		}
 	}
 	//DPrintf("发生甚么事了index为%d\n", index)
@@ -567,11 +574,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, isLeader
 	}
 	index = rf.log[len(rf.log)-1].LogIndex + 1
+	if len(rf.log) == 1 && rf.lastIncludedIndex != 0 {
+		index = rf.lastIncludedIndex + 1
+	}
 	isLeader = true
 	// Your code here (2B).
 	rf.log = append(rf.log, Log{command, rf.currentTerm, index})
 	rf.persist()
-	//DPrintf("我是第%d号,添加log %d,任期为%d,内容为%v\n", rf.me, index, rf.currentTerm, command)
+	DPrintf("我是第%d号,添加log %d,任期为%d,内容为%v\n", rf.me, index, rf.currentTerm, command)
 	return index, term, isLeader
 }
 
@@ -651,7 +661,7 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	tempLog := make([]Log, 0)
 	tempLog = append([]Log{{-1, 0, 0}}, tempLog...)
 	for i := index + 1; i <= rf.log[len(rf.log)-1].LogIndex; i++ {
-		tempLog = append(tempLog, rf.log[i-index])
+		tempLog = append(tempLog, rf.log[i-rf.lastIncludedIndex])
 	}
 	rf.lastIncludedIndex = args.LastIncludeIndex
 	rf.lastIncludedTerm = args.LastIncludeTerm
@@ -662,7 +672,15 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if index > rf.lastApplied {
 		rf.lastApplied = index
 	}
-	rf.persister.Save(rf.persister.raftstate, rf.persister.snapshot)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, args.Data)
 	msg := ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: rf.lastIncludedIndex, SnapshotTerm: rf.lastIncludedTerm}
 	rf.mu.Unlock()
 	rf.applyCh <- msg
