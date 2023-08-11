@@ -130,6 +130,8 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	raftstate := w.Bytes()
 	rf.persister.Save(raftstate, nil)
 }
@@ -146,14 +148,18 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var log []Log
+	var lastIncludedIndex int
+	var lastIncludedTerm int
 	if d.Decode(&currentTerm) != nil ||
-		d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		d.Decode(&votedFor) != nil || d.Decode(&log) != nil || d.Decode(&lastIncludedIndex) != nil || d.Decode(&lastIncludedTerm) != nil {
 		DPrintf("解码错误\n")
 	} else {
 		rf.votedFor = votedFor
 		rf.currentTerm = currentTerm
 		rf.log = make([]Log, len(log))
 		copy(rf.log, log)
+		rf.lastIncludedIndex = lastIncludedIndex
+		rf.lastIncludedTerm = lastIncludedTerm
 	}
 }
 
@@ -174,11 +180,18 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 			rf.lastIncludedTerm = log.CurrentTerm
 			rf.log = rf.log[cutIndex+1:]
 			rf.log = append([]Log{{-1, 0, 0}}, rf.log...)
-			//rf.lastApplied = rf.lastIncludedIndex
 			rf.persist()
+			if index > rf.commitIndex {
+				rf.commitIndex = index
+			}
+			if index > rf.lastApplied {
+				rf.lastApplied = index
+			}
+			DPrintf("我给人砍了，cutIndex+1为%d", cutIndex+1)
+			rf.persister.Save(rf.persister.raftstate, snapshot)
 		}
 	}
-	DPrintf("发生甚么事了index为%d\n", index)
+	//DPrintf("发生甚么事了index为%d\n", index)
 }
 
 // example RequestVote RPC arguments structure.
@@ -586,8 +599,72 @@ func (rf *Raft) resetElectionTimer() {
 	rf.electionTime = t.Add(time.Duration(150+rand.Intn(150)) * time.Millisecond)
 }
 
-func (rf *Raft) InstallSnapShot(server int) {
-
+func (rf *Raft) sendInstallSnapShot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	//rf.mu.Lock()
+	ok := rf.peers[server].Call("Raft.InstallSnapShot", args, reply)
+	if ok {
+		rf.mu.Lock()
+		if reply.Term > rf.currentTerm {
+			rf.role = FOLLOWER
+			rf.electionNum = 0
+			rf.votedFor = -1
+			rf.currentTerm = reply.Term
+			//rf.resetElectionTimer()
+			rf.persist()
+			rf.mu.Unlock()
+			return ok
+		}
+		if reply.Term < rf.currentTerm {
+			rf.mu.Unlock()
+			return ok
+		}
+		if reply.Term == rf.currentTerm {
+			rf.matchIndex[server] = args.LastIncludeIndex
+			rf.nextIndex[server] = args.LastIncludeIndex + 1
+			rf.mu.Unlock()
+			return ok
+		}
+	}
+	return ok
+}
+func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.currentTerm > args.Term {
+		reply.Term = rf.currentTerm
+		return
+	}
+	if args.Term > rf.currentTerm {
+		rf.votedFor = -1
+		rf.currentTerm = args.Term
+		rf.role = FOLLOWER
+		rf.persist()
+	}
+	rf.role = FOLLOWER
+	rf.resetElectionTimer()
+	reply.Term = rf.currentTerm
+	if rf.lastIncludedIndex >= args.LastIncludeIndex {
+		return
+	}
+	index := args.LastIncludeIndex
+	tempLog := make([]Log, 0)
+	tempLog = append([]Log{{-1, 0, 0}}, tempLog...)
+	for i := index + 1; i <= rf.log[len(rf.log)-1].LogIndex; i++ {
+		tempLog = append(tempLog, rf.log[i-index])
+	}
+	rf.lastIncludedIndex = args.LastIncludeIndex
+	rf.lastIncludedTerm = args.LastIncludeTerm
+	rf.log = tempLog
+	if index > rf.commitIndex {
+		rf.commitIndex = index
+	}
+	if index > rf.lastApplied {
+		rf.lastApplied = index
+	}
+	rf.persister.Save(rf.persister.raftstate, rf.persister.snapshot)
+	msg := ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: rf.lastIncludedIndex, SnapshotTerm: rf.lastIncludedTerm}
+	rf.mu.Unlock()
+	rf.applyCh <- msg
 }
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
@@ -606,9 +683,12 @@ func (rf *Raft) ticker() {
 				nextIndex := rf.nextIndex[index]
 				//DPrintf("我是第%d号,nextIndex-1为%d", rf.me, nextIndex-1)
 				prevlog := rf.log[nextIndex-1-rf.lastIncludedIndex]
-				DPrintf("我是第%d号,rf.log[len(rf.log)-1].LogIndex为%d,rf.nextIndex[index]为%d", rf.me, rf.log[len(rf.log)-1].LogIndex, rf.nextIndex[index])
+				DPrintf("我是第%d号,rf.log[len(rf.log)-1].LogIndex为%d,rf.nextIndex[index]为%d,rf.lastIncludedIndex为%d", rf.me, rf.log[len(rf.log)-1].LogIndex, rf.nextIndex[index], rf.lastIncludedIndex)
 				if rf.nextIndex[index] <= rf.lastIncludedIndex {
-					go rf.InstallSnapShot(index)
+					DPrintf("wuhu")
+					args := InstallSnapshotArgs{rf.currentTerm, rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, rf.persister.ReadSnapshot()}
+					reply := InstallSnapshotReply{}
+					go rf.sendInstallSnapShot(index, &args, &reply)
 					continue
 				}
 				args := AppendEntriesArgs{rf.currentTerm, rf.me, prevlog.LogIndex, prevlog.CurrentTerm, make([]Log, rf.log[len(rf.log)-1].LogIndex-rf.nextIndex[index]+1), rf.commitIndex, true}
