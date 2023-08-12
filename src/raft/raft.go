@@ -171,7 +171,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if index <= rf.lastIncludedIndex || index > rf.commitIndex {
+	if index <= rf.lastIncludedIndex {
 		return
 	}
 	for cutIndex, log := range rf.log {
@@ -180,12 +180,12 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 			rf.lastIncludedTerm = log.CurrentTerm
 			rf.log = rf.log[cutIndex+1:]
 			rf.log = append([]Log{{-1, 0, 0}}, rf.log...)
-			//if index > rf.commitIndex {
-			//	rf.commitIndex = index
-			//}
-			//if index > rf.lastApplied {
-			//	rf.lastApplied = index
-			//}
+			if index > rf.commitIndex {
+				rf.commitIndex = index
+			}
+			if index > rf.lastApplied {
+				rf.lastApplied = index
+			}
 			DPrintf("我是第%d号，我给人砍了，最后一个log索引为%d,index为%d", rf.me, rf.log[len(rf.log)-1].LogIndex, index)
 			w := new(bytes.Buffer)
 			e := labgob.NewEncoder(w)
@@ -237,8 +237,8 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) findLastLogInTerm(XTerm int) int {
-	for i := rf.log[len(rf.log)-1].LogIndex; i > 0; i-- {
-		term := rf.log[i].CurrentTerm
+	for i := rf.getLastLogIndex(); i > 0; i-- {
+		term := rf.getLogTerm(i)
 		if term == XTerm {
 			return i
 		} else if term < XTerm {
@@ -246,6 +246,21 @@ func (rf *Raft) findLastLogInTerm(XTerm int) int {
 		}
 	}
 	return -1
+}
+func (rf *Raft) getLastLogIndex() int {
+	return rf.lastIncludedIndex + len(rf.log) - 1
+}
+func (rf *Raft) getLogIndex(index int) int {
+	if index > rf.lastIncludedIndex {
+		return rf.log[index-rf.lastIncludedIndex].LogIndex
+	}
+	return rf.lastIncludedIndex
+}
+func (rf *Raft) getLogTerm(index int) int {
+	if index > rf.lastIncludedIndex {
+		return rf.log[index-rf.lastIncludedIndex].CurrentTerm
+	}
+	return rf.lastIncludedTerm
 }
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
@@ -271,18 +286,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.role = FOLLOWER
 	rf.resetElectionTimer()
 	reply.Term = rf.currentTerm
-	if args.PrevLogIndex > rf.log[len(rf.log)-1].LogIndex {
+	if args.PrevLogIndex > rf.getLastLogIndex() {
 		reply.XTerm = -1
 		reply.XIndex = -1
-		reply.XLen = len(rf.log)
+		//reply.XLen = len(rf.log)
+		reply.XLen = rf.getLastLogIndex() + 1
 		reply.Success = false
+		//DPrintf("wuhuwuhuwuhuwuhu,reply.XLen为%d,rf.last为%d,rf.getLastLogIndex()+1为%d", reply.XLen, rf.lastIncludedIndex, rf.getLastLogIndex()+1)
 		return
 	}
-	if rf.log[args.PrevLogIndex-rf.lastIncludedIndex].CurrentTerm != args.PrevLogTerm {
+	if rf.getLogTerm(args.PrevLogIndex) != args.PrevLogTerm {
 		//DPrintf("我是第%d号,参数日志任期为%d,我对应的日志任期为%d,最后一条日志任期为%d", rf.me, args.PrevLogTerm, rf.log[args.PrevLogIndex].CurrentTerm, rf.log[len(rf.log)-1].CurrentTerm)
-		reply.XTerm = rf.log[args.PrevLogIndex-rf.lastIncludedIndex].CurrentTerm
+		reply.XTerm = rf.getLogTerm(args.PrevLogIndex)
 		for index := args.PrevLogIndex; index > 0; index-- {
-			if rf.log[index-1-rf.lastIncludedIndex].CurrentTerm != reply.XTerm {
+			//DPrintf("index为%d,rf.lastIncludedIndex为%d", index, rf.lastIncludedIndex)
+			if rf.getLogTerm(index-1) != reply.XTerm {
 				reply.XIndex = index
 				break
 			}
@@ -293,11 +311,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	reply.Success = true
 	for idx, entry := range args.Entries {
-		if entry.LogIndex <= rf.log[len(rf.log)-1].LogIndex && rf.log[entry.LogIndex-rf.lastIncludedIndex].CurrentTerm != entry.CurrentTerm {
+		if entry.LogIndex <= rf.getLastLogIndex() && rf.getLogTerm(entry.LogIndex) != entry.CurrentTerm {
 			rf.log = rf.log[:(entry.LogIndex - rf.lastIncludedIndex)]
 			rf.persist()
 		}
-		if entry.LogIndex > rf.log[len(rf.log)-1].LogIndex {
+		if entry.LogIndex > rf.getLastLogIndex() {
 			rf.log = append(rf.log, args.Entries[idx:]...)
 			rf.persist()
 			break
@@ -313,7 +331,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//DPrintf("我是第%d号,任期为%d,添加log %d,内容为%v\n", rf.me, rf.currentTerm, rf.log[len(rf.log)-1].LogIndex, rf.log[len(rf.log)-1].Context)
 	//DPrintf("我是第%d号，我已同步\n", rf.me)
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = min(args.LeaderCommit, rf.log[len(rf.log)-1].LogIndex)
+		rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
 		rf.applyCond.Broadcast()
 	}
 	//if rf.commitIndex > rf.lastApplied {
@@ -398,7 +416,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			if reply.Success == false && rf.nextIndex[server] > 1 {
 				if reply.XTerm == -1 {
 					rf.nextIndex[server] = reply.XLen
-					//DPrintf("FALSE:我是第%d号，我的日志长度为%d,nextIndex为%d", rf.me, len(rf.log), rf.nextIndex[server])
+					DPrintf("FALSE:我是第%d号，我的日志长度为%d,nextIndex为%d", rf.me, len(rf.log), rf.nextIndex[server])
 				} else {
 					lastLogIndex := rf.findLastLogInTerm(reply.XTerm)
 					//DPrintf("lastLogIndex为%d,reply的XIndex为%d,reply的任期为%d", lastLogIndex, reply.XIndex, reply.XTerm)
@@ -413,6 +431,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 				//DPrintf("FALSE:我是第%d号，我的日志长度为%d,nextIndex为%d", rf.me, len(rf.log), rf.nextIndex[server])
 			}
 		}
+		//DPrintf("fuck,index为%d,rf.nextIndex[index]为%d", server, rf.nextIndex[server])
 		rf.mu.Unlock()
 	}
 	return ok
@@ -498,7 +517,7 @@ func (rf *Raft) applier() {
 			rf.mu.Unlock()
 			rf.applyCh <- msg
 			rf.mu.Lock()
-			//DPrintf("我是第%d号,我的任期是%d,我提交了日志%d,内容是%v", rf.me, rf.currentTerm, rf.lastApplied, rf.log[rf.lastApplied].Context)
+			DPrintf("我是第%d号,我的任期是%d,我提交了日志%d,内容是%v", rf.me, rf.currentTerm, rf.lastApplied, rf.log[rf.lastApplied-rf.lastIncludedIndex].Context)
 		} else {
 			rf.applyCond.Wait()
 		}
@@ -581,7 +600,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.log = append(rf.log, Log{command, rf.currentTerm, index})
 	rf.persist()
-	DPrintf("我是第%d号,添加log %d,任期为%d,内容为%v\n", rf.me, index, rf.currentTerm, command)
+	DPrintf("我是第%d号,添加log %d,任期为%d,内容为%v,我的提交为%d\n", rf.me, index, rf.currentTerm, command, rf.lastApplied)
 	return index, term, isLeader
 }
 
@@ -631,6 +650,7 @@ func (rf *Raft) sendInstallSnapShot(server int, args *InstallSnapshotArgs, reply
 		if reply.Term == rf.currentTerm {
 			rf.matchIndex[server] = args.LastIncludeIndex
 			rf.nextIndex[server] = args.LastIncludeIndex + 1
+			DPrintf("server为%d,rf.nextIndex[server]为%d", server, rf.nextIndex[server])
 			rf.mu.Unlock()
 			return ok
 		}
@@ -655,6 +675,7 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	reply.Term = rf.currentTerm
 	if rf.lastIncludedIndex >= args.LastIncludeIndex {
 		rf.mu.Unlock()
+		//DPrintf("我是第%d号，我正在安装日志，参数的rf.lastIncludedIndex为%d，我的rf.lastIncludedIndex为%d", rf.me, args.LastIncludeIndex, rf.lastIncludedIndex)
 		return
 	}
 	index := args.LastIncludeIndex
@@ -681,8 +702,9 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	e.Encode(rf.lastIncludedTerm)
 	raftstate := w.Bytes()
 	rf.persister.Save(raftstate, args.Data)
-	msg := ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: rf.lastIncludedIndex, SnapshotTerm: rf.lastIncludedTerm}
+	msg := ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: args.LastIncludeIndex, SnapshotTerm: args.LastIncludeTerm}
 	rf.mu.Unlock()
+	DPrintf("我是第%d号，我安装了日志", rf.me)
 	rf.applyCh <- msg
 }
 func (rf *Raft) ticker() {
@@ -701,29 +723,28 @@ func (rf *Raft) ticker() {
 				}
 				nextIndex := rf.nextIndex[index]
 				//DPrintf("我是第%d号,nextIndex-1为%d", rf.me, nextIndex-1)
-				//DPrintf("我是第%d号,rf.log[len(rf.log)-1].LogIndex为%d,rf.nextIndex[index]为%d,rf.lastIncludedIndex为%d", rf.me, rf.log[len(rf.log)-1].LogIndex, rf.nextIndex[index], rf.lastIncludedIndex)
+				//DPrintf("我是第%d号,rf.log[len(rf.log)-1].LogIndex为%d,index为%d,rf.nextIndex[index]为%d,rf.lastIncludedIndex为%d", rf.me, rf.log[len(rf.log)-1].LogIndex, index, rf.nextIndex[index], rf.lastIncludedIndex)
 				if rf.nextIndex[index] <= rf.lastIncludedIndex {
-					//DPrintf("wuhu")
+					//DPrintf("我是第%d号，准备安装日志，我的rf.lastIncludedIndex为%d", rf.me, rf.lastIncludedIndex)
 					args := InstallSnapshotArgs{rf.currentTerm, rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, rf.persister.ReadSnapshot()}
 					reply := InstallSnapshotReply{}
 					go rf.sendInstallSnapShot(index, &args, &reply)
 					continue
 				}
-				lastLogIndex := rf.log[len(rf.log)-1].LogIndex
-				prevlog := rf.log[nextIndex-1-rf.lastIncludedIndex]
-				prevLogIndex := prevlog.LogIndex
-				prevLogTerm := prevlog.CurrentTerm
-				if rf.nextIndex[index]-1 == rf.lastIncludedIndex && rf.lastIncludedIndex != 0 {
-					lastLogIndex = rf.lastIncludedIndex
-					prevLogIndex = rf.lastIncludedIndex
-					prevLogTerm = rf.lastIncludedTerm
-				}
+				lastLogIndex := rf.getLastLogIndex()
+				prevLogIndex := rf.getLogIndex(nextIndex - 1)
+				prevLogTerm := rf.getLogTerm(nextIndex - 1)
+				//if rf.nextIndex[index]-1 == rf.lastIncludedIndex && rf.lastIncludedIndex != 0 {
+				//	lastLogIndex = rf.lastIncludedIndex
+				//	prevLogIndex = rf.lastIncludedIndex
+				//	prevLogTerm = rf.lastIncludedTerm
+				//}
 				args := AppendEntriesArgs{rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, make([]Log, lastLogIndex-rf.nextIndex[index]+1), rf.commitIndex, true}
-				//DPrintf("我是第%d号,entries的长度为%d,%d,%d", rf.me, len(args.Entries), rf.log[len(rf.log)-1].LogIndex, rf.nextIndex[index])
+				DPrintf("prevlogIndex为%d,我是第%d号,entries的长度为%d,log长度为%d,lastlog为%d,next%d", prevLogIndex, rf.me, len(args.Entries), len(rf.log), lastLogIndex, rf.nextIndex[index])
 				//args := AppendEntriesArgs{rf.currentTerm, rf.me, prevlog.LogIndex, prevlog.CurrentTerm, make([]Log, 0), rf.commitIndex, true}
 				reply := AppendEntriesReply{}
 				copy(args.Entries, rf.log[(rf.nextIndex[index]-rf.lastIncludedIndex):])
-				//DPrintf("拷贝的log为%d\n", rf.nextIndex[index])
+				//DPrintf("拷贝的log为%d\n", rf.log[rf.nextIndex[index]-rf.lastIncludedIndex].Context)
 				go rf.sendAppendEntries(index, &args, &reply)
 			}
 		}
@@ -740,7 +761,13 @@ func (rf *Raft) ticker() {
 				if i == rf.me {
 					continue
 				}
-				args := RequestVoteArgs{rf.currentTerm, rf.me, rf.log[len(rf.log)-1].LogIndex, rf.log[len(rf.log)-1].CurrentTerm}
+				lastLogIndex := rf.log[len(rf.log)-1].LogIndex
+				lastLogTerm := rf.log[len(rf.log)-1].CurrentTerm
+				if lastLogIndex == 0 && rf.lastIncludedIndex != 0 {
+					lastLogIndex = rf.lastIncludedIndex
+					lastLogTerm = rf.lastIncludedTerm
+				}
+				args := RequestVoteArgs{rf.currentTerm, rf.me, lastLogIndex, lastLogTerm}
 				reply := RequestVoteReply{}
 				go rf.sendRequestVote(i, &args, &reply)
 			}
