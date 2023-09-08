@@ -7,6 +7,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = false
@@ -18,11 +19,14 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Operation string
+	Key       string
+	Value     string
+	ClientId  int64
 }
 
 type KVServer struct {
@@ -35,15 +39,88 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	replyChMap   map[int]chan ApplyNotifyMsg
+	clientMaxSeq map[int64]CommandContext
+	DB           map[string]string
 }
 
+type ApplyNotifyMsg struct {
+	Err   Err
+	Term  int
+	Value string
+}
+
+type CommandContext struct {
+	CommandId int
+	Msg       ApplyNotifyMsg
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	kv.mu.Lock()
+	lastCommandContext, ok := kv.clientMaxSeq[args.ClientId]
+	if ok {
+		if args.CommandId <= lastCommandContext.CommandId {
+			reply.Err = lastCommandContext.Msg.Err
+			reply.Value = lastCommandContext.Msg.Value
+			kv.mu.Unlock()
+			return
+		}
+	}
+	command := Op{Operation: args.Operation, Key: args.Key, ClientId: args.ClientId}
+	index, term, isLeader := kv.rf.Start(command)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		return
+	}
+	replyCh := make(chan ApplyNotifyMsg, 1)
+	kv.replyChMap[index] = replyCh
+	kv.mu.Unlock()
+	select {
+	case replyMsg := <-replyCh:
+		if term == replyMsg.Term {
+			reply.Err = replyMsg.Err
+			reply.Value = replyMsg.Value
+		} else {
+			reply.Err = ErrWrongLeader
+		}
+	case <-time.After(500 * time.Millisecond):
+		reply.Err = ErrTimeout
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	lastCommandContext, ok := kv.clientMaxSeq[args.ClientId]
+	if ok {
+		if args.CommandId <= lastCommandContext.CommandId {
+			reply.Err = lastCommandContext.Msg.Err
+			kv.mu.Unlock()
+			return
+		}
+	}
+	command := Op{Operation: args.Operation, Key: args.Key, ClientId: args.ClientId}
+	index, term, isLeader := kv.rf.Start(command)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		return
+	}
+	replyCh := make(chan ApplyNotifyMsg, 1)
+	kv.replyChMap[index] = replyCh
+	kv.mu.Unlock()
+	select {
+	case replyMsg := <-replyCh:
+		if term == replyMsg.Term {
+			reply.Err = replyMsg.Err
+		} else {
+			reply.Err = ErrWrongLeader
+		}
+	case <-time.After(500 * time.Millisecond):
+		reply.Err = ErrTimeout
+	}
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -63,6 +140,52 @@ func (kv *KVServer) Kill() {
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
+}
+func (kv *KVServer) applier() {
+	for !kv.killed() {
+		select {
+		case applyMsg := <-kv.applyCh:
+			if applyMsg.CommandValid {
+				kv.applyCommand(applyMsg)
+			}
+		}
+
+	}
+
+}
+
+func (kv *KVServer) applyCommand(applyMsg raft.ApplyMsg) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	commandIndex := applyMsg.CommandIndex
+	command := applyMsg.Command.(Op)
+	index := applyMsg.CommandIndex
+	lastCommandContext, ok := kv.clientMaxSeq[command.ClientId]
+	replyMsg := ApplyNotifyMsg{}
+	if ok {
+		if commandIndex <= lastCommandContext.CommandId {
+			return
+		}
+	}
+	if command.Operation == "Get" {
+		value, ok := kv.DB[command.Key]
+		if ok {
+			replyMsg.Value = value
+		} else {
+			replyMsg.Err = ErrNoKey
+		}
+	} else if command.Operation == "Put" {
+		kv.DB[command.Key] = command.Value
+		replyMsg = ApplyNotifyMsg{Value: command.Value, Term: applyMsg.CommandTerm}
+	} else if command.Operation == "Append" {
+		kv.DB[command.Key] += command.Value
+		replyMsg = ApplyNotifyMsg{Value: kv.DB[command.Key], Term: applyMsg.CommandTerm}
+	}
+	channel, ok := kv.replyChMap[index]
+	if ok {
+		channel <- replyMsg
+	}
+	kv.clientMaxSeq[command.ClientId] = CommandContext{CommandId: commandIndex, Msg: replyMsg}
 }
 
 // servers[] contains the ports of the set of
@@ -90,8 +213,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
+	kv.clientMaxSeq = make(map[int64]CommandContext)
+	kv.replyChMap = make(map[int]chan ApplyNotifyMsg)
+	kv.DB = make(map[string]string)
 	// You may need initialization code here.
-
+	go kv.applier()
 	return kv
 }

@@ -41,7 +41,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
-
+	CommandTerm  int
 	// For 2D:
 	SnapshotValid bool
 	Snapshot      []byte
@@ -523,7 +523,7 @@ func (rf *Raft) applier() {
 		if rf.commitIndex > rf.lastApplied {
 			rf.lastApplied++
 			//DPrintf("我是第%d号，rf.lastApplied为%d,rf.lastIncludedIndex为%d", rf.me, rf.lastApplied, rf.lastIncludedIndex)
-			msg := ApplyMsg{CommandValid: true, Command: rf.log[rf.lastApplied-rf.lastIncludedIndex].Context, CommandIndex: rf.lastApplied}
+			msg := ApplyMsg{CommandValid: true, Command: rf.log[rf.lastApplied-rf.lastIncludedIndex].Context, CommandIndex: rf.lastApplied, CommandTerm: rf.currentTerm}
 			rf.mu.Unlock()
 			rf.applyCh <- msg
 			rf.mu.Lock()

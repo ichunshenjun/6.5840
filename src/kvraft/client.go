@@ -1,13 +1,19 @@
 package kvraft
 
-import "6.5840/labrpc"
+import (
+	"6.5840/labrpc"
+	"sync"
+)
 import "crypto/rand"
 import "math/big"
-
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	leaderId             int
+	clientId             int64
+	lastAppliedCommandId int
+	mu                   sync.Mutex
 }
 
 func nrand() int64 {
@@ -21,6 +27,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.clientId = nrand()
+	ck.leaderId = 0
+	ck.lastAppliedCommandId = 0
 	return ck
 }
 
@@ -35,9 +44,29 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+	commandId := ck.lastAppliedCommandId + 1
+	serverId := ck.leaderId
+	serverNum := len(ck.servers)
+	for ; ; serverId = (serverId + 1) % serverNum {
+		args := &GetArgs{
+			Key:       key,
+			ClientId:  ck.clientId,
+			CommandId: commandId,
+		}
+		reply := &GetReply{}
+		DPrintf("client[%d]:发送Get RPC到server[%d]\n", ck.clientId, ck.leaderId)
+		ok := ck.servers[ck.leaderId].Call("KVServer.Get", args, reply)
+		if !ok || reply.Err == ErrTimeout || reply.Err == ErrWrongLeader {
+			continue
+		}
+		ck.leaderId = serverId
+		ck.lastAppliedCommandId = commandId
+		if reply.Err == ErrNoKey {
+			return ""
+		}
+		return reply.Value
+	}
 }
 
 // shared by Put and Append.
@@ -50,6 +79,21 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	commandId := ck.lastAppliedCommandId + 1
+	serverId := ck.leaderId
+	serverNum := len(ck.servers)
+	for ; ; serverId = (serverId + 1) % serverNum {
+		args := &PutAppendArgs{key, value, op, ck.clientId, commandId}
+		reply := &PutAppendReply{}
+		DPrintf("client[%d]:发送PutAppend RPC到server[%d]\n", ck.clientId, ck.leaderId)
+		ok := ck.servers[ck.leaderId].Call("KVServer.PutAppend", args, reply)
+		if !ok || reply.Err == ErrTimeout || reply.Err == ErrWrongLeader {
+			continue
+		}
+		ck.leaderId = serverId
+		ck.lastAppliedCommandId = commandId
+		return
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
