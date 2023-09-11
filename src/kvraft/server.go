@@ -27,6 +27,7 @@ type Op struct {
 	Key       string
 	Value     string
 	ClientId  int64
+	CommandId int
 }
 
 type KVServer struct {
@@ -67,7 +68,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			return
 		}
 	}
-	command := Op{Operation: args.Operation, Key: args.Key, ClientId: args.ClientId}
+	command := Op{Operation: args.Operation, Key: args.Key, ClientId: args.ClientId, CommandId: args.CommandId}
 	index, term, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -101,7 +102,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			return
 		}
 	}
-	command := Op{Operation: args.Operation, Key: args.Key, ClientId: args.ClientId}
+	command := Op{Operation: args.Operation, Key: args.Key, Value: args.Value, ClientId: args.ClientId, CommandId: args.CommandId}
+	DPrintf("kvserver[%d]:开始raft同步key为%v,value为%v\n", kv.me, command.Key, command.Value)
 	index, term, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -114,6 +116,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	select {
 	case replyMsg := <-replyCh:
 		if term == replyMsg.Term {
+			DPrintf("PutAppend term为%d,回复的term为%d,回复的value为%v", term, replyMsg.Term, replyMsg.Value)
 			reply.Err = replyMsg.Err
 		} else {
 			reply.Err = ErrWrongLeader
@@ -163,29 +166,32 @@ func (kv *KVServer) applyCommand(applyMsg raft.ApplyMsg) {
 	lastCommandContext, ok := kv.clientMaxSeq[command.ClientId]
 	replyMsg := ApplyNotifyMsg{}
 	if ok {
-		if commandIndex <= lastCommandContext.CommandId {
+		if command.CommandId <= lastCommandContext.CommandId {
 			return
 		}
 	}
 	if command.Operation == "Get" {
 		value, ok := kv.DB[command.Key]
 		if ok {
-			replyMsg.Value = value
+			replyMsg = ApplyNotifyMsg{Value: value, Term: applyMsg.CommandTerm, Err: OK}
+			DPrintf("kvserver[%d]:完成Get,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
 		} else {
-			replyMsg.Err = ErrNoKey
+			replyMsg = ApplyNotifyMsg{Value: value, Term: applyMsg.CommandTerm, Err: ErrNoKey}
 		}
 	} else if command.Operation == "Put" {
 		kv.DB[command.Key] = command.Value
-		replyMsg = ApplyNotifyMsg{Value: command.Value, Term: applyMsg.CommandTerm}
+		replyMsg = ApplyNotifyMsg{Value: command.Value, Term: applyMsg.CommandTerm, Err: OK}
+		DPrintf("kvserver[%d]:完成Put,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
 	} else if command.Operation == "Append" {
 		kv.DB[command.Key] += command.Value
-		replyMsg = ApplyNotifyMsg{Value: kv.DB[command.Key], Term: applyMsg.CommandTerm}
+		replyMsg = ApplyNotifyMsg{Value: kv.DB[command.Key], Term: applyMsg.CommandTerm, Err: OK}
+		DPrintf("kvserver[%d]:完成Append,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
 	}
 	channel, ok := kv.replyChMap[index]
 	if ok {
 		channel <- replyMsg
 	}
-	kv.clientMaxSeq[command.ClientId] = CommandContext{CommandId: commandIndex, Msg: replyMsg}
+	kv.clientMaxSeq[command.ClientId] = CommandContext{CommandId: command.CommandId, Msg: replyMsg}
 }
 
 // servers[] contains the ports of the set of

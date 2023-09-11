@@ -611,6 +611,38 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, Log{command, rf.currentTerm, index})
 	rf.persist()
 	//DPrintf("我是第%d号,添加log %d,任期为%d,内容为%v,我的提交为%d\n", rf.me, index, rf.currentTerm, command, rf.lastApplied)
+	for index := 0; index < len(rf.peers); index++ {
+		if index == rf.me {
+			rf.resetElectionTimer()
+			//DPrintf("我是第 %d号,我的任期为 %d", rf.me, rf.currentTerm)
+			continue
+		}
+		nextIndex := rf.nextIndex[index]
+		//DPrintf("我是第%d号,nextIndex-1为%d", rf.me, nextIndex-1)
+		//DPrintf("我是第%d号,rf.log[len(rf.log)-1].LogIndex为%d,index为%d,rf.nextIndex[index]为%d,rf.lastIncludedIndex为%d", rf.me, rf.log[len(rf.log)-1].LogIndex, index, rf.nextIndex[index], rf.lastIncludedIndex)
+		if rf.nextIndex[index] <= rf.lastIncludedIndex {
+			//DPrintf("我是第%d号，准备安装日志，我的rf.lastIncludedIndex为%d", rf.me, rf.lastIncludedIndex)
+			args := InstallSnapshotArgs{rf.currentTerm, rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, rf.persister.ReadSnapshot()}
+			reply := InstallSnapshotReply{}
+			go rf.sendInstallSnapShot(index, &args, &reply)
+			continue
+		}
+		lastLogIndex := rf.getLastLogIndex()
+		prevLogIndex := rf.getLogIndex(nextIndex - 1)
+		prevLogTerm := rf.getLogTerm(nextIndex - 1)
+		//if rf.nextIndex[index]-1 == rf.lastIncludedIndex && rf.lastIncludedIndex != 0 {
+		//	lastLogIndex = rf.lastIncludedIndex
+		//	prevLogIndex = rf.lastIncludedIndex
+		//	prevLogTerm = rf.lastIncludedTerm
+		//}
+		args := AppendEntriesArgs{rf.currentTerm, rf.me, prevLogIndex, prevLogTerm, make([]Log, lastLogIndex-rf.nextIndex[index]+1), rf.commitIndex, true}
+		//DPrintf("prevlogIndex为%d,我是第%d号,entries的长度为%d,log长度为%d,lastlog为%d,next%d", prevLogIndex, rf.me, len(args.Entries), len(rf.log), lastLogIndex, rf.nextIndex[index])
+		//args := AppendEntriesArgs{rf.currentTerm, rf.me, prevlog.LogIndex, prevlog.CurrentTerm, make([]Log, 0), rf.commitIndex, true}
+		reply := AppendEntriesReply{}
+		copy(args.Entries, rf.log[(rf.nextIndex[index]-rf.lastIncludedIndex):])
+		//DPrintf("拷贝的log为%d\n", rf.log[rf.nextIndex[index]-rf.lastIncludedIndex].Context)
+		go rf.sendAppendEntries(index, &args, &reply)
+	}
 	return index, term, isLeader
 }
 
