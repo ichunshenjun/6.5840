@@ -84,14 +84,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	commandId := ck.lastAppliedCommandId + 1
 	serverId := ck.leaderId
 	serverNum := len(ck.servers)
-	DPrintf("op为%v,value为%v", op, value)
+	//DPrintf("op为%v,value为%v", op, value)
 	for ; ; serverId = (serverId + 1) % serverNum {
 		args := &PutAppendArgs{key, value, op, ck.clientId, commandId}
 		reply := &PutAppendReply{}
-		DPrintf("client[%d]:发送PutAppend RPC[%d]到server[%d],args为%v\n", ck.clientId, commandId, serverId, args)
+		//DPrintf("client[%d]:发送PutAppend RPC[%d]到server[%d],args为%v\n", ck.clientId, commandId, serverId, args)
 		ok := ck.servers[serverId].Call("KVServer.PutAppend", args, reply)
 		if !ok || reply.Err == ErrTimeout || reply.Err == ErrWrongLeader {
-			DPrintf("client[%d]:发送PutAppend RPC失败因为%v", ck.clientId, reply.Err)
+			//DPrintf("client[%d]:发送PutAppend RPC失败因为%v", ck.clientId, reply.Err)
 			continue
 		}
 		ck.leaderId = serverId

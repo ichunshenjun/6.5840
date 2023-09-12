@@ -4,6 +4,7 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -40,9 +41,10 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	replyChMap   map[int]chan ApplyNotifyMsg
-	clientMaxSeq map[int64]CommandContext
-	DB           map[string]string
+	replyChMap        map[int]chan ApplyNotifyMsg
+	clientMaxSeq      map[int64]CommandContext
+	DB                map[string]string
+	lastIncludedIndex int
 }
 
 type ApplyNotifyMsg struct {
@@ -103,7 +105,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		}
 	}
 	command := Op{Operation: args.Operation, Key: args.Key, Value: args.Value, ClientId: args.ClientId, CommandId: args.CommandId}
-	DPrintf("kvserver[%d]:开始raft同步key为%v,value为%v\n", kv.me, command.Key, command.Value)
+	//DPrintf("kvserver[%d]:开始raft同步key为%v,value为%v\n", kv.me, command.Key, command.Value)
 	index, term, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -116,7 +118,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	select {
 	case replyMsg := <-replyCh:
 		if term == replyMsg.Term {
-			DPrintf("PutAppend term为%d,回复的term为%d,回复的value为%v", term, replyMsg.Term, replyMsg.Value)
+			//DPrintf("PutAppend term为%d,回复的term为%d,回复的value为%v", term, replyMsg.Term, replyMsg.Value)
 			reply.Err = replyMsg.Err
 		} else {
 			reply.Err = ErrWrongLeader
@@ -144,12 +146,34 @@ func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
 }
+
+func (kv *KVServer) readSnapShot(snapshot []byte) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	var DB map[string]string
+	var clientMaxSeq map[int64]CommandContext
+	if d.Decode(&DB) != nil || d.Decode(&clientMaxSeq) != nil {
+		DPrintf("安装日志失败")
+	} else {
+		kv.DB = DB
+		kv.clientMaxSeq = clientMaxSeq
+	}
+}
 func (kv *KVServer) applier() {
 	for !kv.killed() {
 		select {
 		case applyMsg := <-kv.applyCh:
 			if applyMsg.CommandValid {
 				kv.applyCommand(applyMsg)
+			} else if applyMsg.SnapshotValid {
+				if applyMsg.SnapshotIndex < kv.lastIncludedIndex {
+					return
+				} else {
+					kv.lastIncludedIndex = applyMsg.SnapshotIndex
+					kv.readSnapShot(applyMsg.Snapshot)
+				}
 			}
 		}
 
@@ -174,24 +198,32 @@ func (kv *KVServer) applyCommand(applyMsg raft.ApplyMsg) {
 		value, ok := kv.DB[command.Key]
 		if ok {
 			replyMsg = ApplyNotifyMsg{Value: value, Term: applyMsg.CommandTerm, Err: OK}
-			DPrintf("kvserver[%d]:完成Get,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
+			//DPrintf("kvserver[%d]:完成Get,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
 		} else {
 			replyMsg = ApplyNotifyMsg{Value: value, Term: applyMsg.CommandTerm, Err: ErrNoKey}
 		}
 	} else if command.Operation == "Put" {
 		kv.DB[command.Key] = command.Value
 		replyMsg = ApplyNotifyMsg{Value: command.Value, Term: applyMsg.CommandTerm, Err: OK}
-		DPrintf("kvserver[%d]:完成Put,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
+		//DPrintf("kvserver[%d]:完成Put,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
 	} else if command.Operation == "Append" {
 		kv.DB[command.Key] += command.Value
 		replyMsg = ApplyNotifyMsg{Value: kv.DB[command.Key], Term: applyMsg.CommandTerm, Err: OK}
-		DPrintf("kvserver[%d]:完成Append,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
+		//DPrintf("kvserver[%d]:完成Append,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
 	}
 	channel, ok := kv.replyChMap[index]
 	if ok {
 		channel <- replyMsg
 	}
 	kv.clientMaxSeq[command.ClientId] = CommandContext{CommandId: command.CommandId, Msg: replyMsg}
+	kv.lastIncludedIndex = index
+	if kv.maxraftstate != -1 && kv.rf.GetStateSize() > kv.maxraftstate {
+		w := new(bytes.Buffer)
+		e := labgob.NewEncoder(w)
+		e.Encode(kv.DB)
+		e.Encode(kv.clientMaxSeq)
+		go kv.rf.Snapshot(commandIndex, w.Bytes())
+	}
 }
 
 // servers[] contains the ports of the set of
@@ -222,6 +254,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.clientMaxSeq = make(map[int64]CommandContext)
 	kv.replyChMap = make(map[int]chan ApplyNotifyMsg)
 	kv.DB = make(map[string]string)
+
+	kv.readSnapShot(kv.rf.GetSnapShot())
 	// You may need initialization code here.
 	go kv.applier()
 	return kv
