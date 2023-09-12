@@ -168,7 +168,7 @@ func (kv *KVServer) applier() {
 			if applyMsg.CommandValid {
 				kv.applyCommand(applyMsg)
 			} else if applyMsg.SnapshotValid {
-				if applyMsg.SnapshotIndex < kv.lastIncludedIndex {
+				if applyMsg.SnapshotIndex <= kv.lastIncludedIndex {
 					return
 				} else {
 					kv.lastIncludedIndex = applyMsg.SnapshotIndex
@@ -217,7 +217,7 @@ func (kv *KVServer) applyCommand(applyMsg raft.ApplyMsg) {
 	}
 	kv.clientMaxSeq[command.ClientId] = CommandContext{CommandId: command.CommandId, Msg: replyMsg}
 	kv.lastIncludedIndex = index
-	if kv.maxraftstate != -1 && kv.rf.GetStateSize() > kv.maxraftstate {
+	if kv.maxraftstate != -1 && kv.rf.GetStateSize() > kv.maxraftstate && commandIndex-kv.rf.GetSnapShotIndex() >= 20 {
 		w := new(bytes.Buffer)
 		e := labgob.NewEncoder(w)
 		e.Encode(kv.DB)

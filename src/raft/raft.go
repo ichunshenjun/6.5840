@@ -123,6 +123,10 @@ func (rf *Raft) GetSnapShot() []byte {
 	return rf.persister.snapshot
 }
 
+func (rf *Raft) GetSnapShotIndex() int {
+	return rf.lastIncludedIndex
+}
+
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
