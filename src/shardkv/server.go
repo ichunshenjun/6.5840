@@ -263,8 +263,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.ctrlers = ctrlers
 
 	// Your initialization code here.
-	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.clientMaxSeq = make(map[int64]CommandContext)
 	kv.replyChMap = make(map[int]chan ApplyNotifyMsg)
 	kv.DB = make(map[string]string)
@@ -275,5 +273,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+	kv.readSnapShot(kv.rf.GetSnapShot())
+	// You may need initialization code here.
+	go kv.applier()
 	return kv
 }
