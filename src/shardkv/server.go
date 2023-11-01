@@ -128,7 +128,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 			return
 		}
 	}
-	command := Op{Operation: args.Op, Key: args.Key, ClientId: args.ClientId, CommandId: args.CommandId}
+	command := Command{Operation, Op{Operation: args.Op, Key: args.Key, ClientId: args.ClientId, CommandId: args.CommandId}}
 	index, term, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -162,7 +162,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			return
 		}
 	}
-	command := Op{Operation: args.Op, Key: args.Key, Value: args.Value, ClientId: args.ClientId, CommandId: args.CommandId}
+	command := Command{Operation, Op{Operation: args.Op, Key: args.Key, Value: args.Value, ClientId: args.ClientId, CommandId: args.CommandId}}
 	//DPrintf("kvserver[%d]:开始raft同步key为%v,value为%v\n", kv.me, command.Key, command.Value)
 	index, term, isLeader := kv.rf.Start(command)
 	if !isLeader {
