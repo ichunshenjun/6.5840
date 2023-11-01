@@ -10,6 +10,7 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
+	"6.5840/shardctrler"
 )
 
 const Debug = false
@@ -48,8 +49,24 @@ type ShardKV struct {
 	DB                map[string]string
 	dead              int32
 	lastIncludedIndex int
+	shards            map[int]*Shard
+	currConfig        shardctrler.Config
+	sc                *shardctrler.Clerk //此sc非shardctrler的sc
 }
 
+type ShardStatus uint8
+
+const (
+	Serving ShardStatus = iota
+	Pulling
+	BePulling
+	GCing
+)
+
+type Shard struct {
+	KV     map[string]string
+	Status ShardStatus
+}
 type ApplyNotifyMsg struct {
 	Err   Err
 	Term  int
@@ -59,6 +76,44 @@ type ApplyNotifyMsg struct {
 type CommandContext struct {
 	CommandId int
 	Msg       ApplyNotifyMsg
+}
+
+type CommandType uint8
+
+const (
+	Operation CommandType = iota
+	Configuration
+	InsertShards
+	DeleteShards
+	EmptyEntry
+)
+
+type Command struct {
+	CmdType CommandType
+	Data    interface{}
+}
+
+func (kv *ShardKV) Execute(command Command, reply *ApplyNotifyMsg) {
+	index, term, isLeader := kv.rf.Start(command)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	kv.mu.Lock()
+	replyCh := make(chan ApplyNotifyMsg, 1)
+	kv.replyChMap[index] = replyCh
+	kv.mu.Unlock()
+	select {
+	case replyMsg := <-replyCh:
+		if term == replyMsg.Term {
+			reply.Err = replyMsg.Err
+			reply.Value = replyMsg.Value
+		} else {
+			reply.Err = ErrWrongLeader
+		}
+	case <-time.After(500 * time.Millisecond):
+		reply.Err = ErrTimeout
+	}
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
@@ -178,49 +233,76 @@ func (kv *ShardKV) applier() {
 	}
 
 }
-
+func (kv *ShardKV) applyConfiguration(nextConfig *shardctrler.Config) *ApplyNotifyMsg {
+	return &ApplyNotifyMsg{}
+}
 func (kv *ShardKV) applyCommand(applyMsg raft.ApplyMsg) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	commandIndex := applyMsg.CommandIndex
-	command := applyMsg.Command.(Op)
+	command := applyMsg.Command.(Command)
 	index := applyMsg.CommandIndex
-	lastCommandContext, ok := kv.clientMaxSeq[command.ClientId]
 	replyMsg := ApplyNotifyMsg{}
-	if ok {
-		if command.CommandId <= lastCommandContext.CommandId {
-			return
-		}
+	if applyMsg.CommandIndex <= kv.lastIncludedIndex {
+		return
 	}
-	if command.Operation == "Get" {
-		value, ok := kv.DB[command.Key]
+	switch command.CmdType {
+	case Configuration:
+		nextConfig := command.Data.(shardctrler.Config)
+		replyMsg = *kv.applyConfiguration(&nextConfig)
+	case Operation:
+		op := command.Data.(Op)
+		if op.Operation == "Get" {
+			value, ok := kv.DB[op.Key]
+			if ok {
+				replyMsg = ApplyNotifyMsg{Value: value, Term: applyMsg.CommandTerm, Err: OK}
+				//DPrintf("kvserver[%d]:完成Get,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
+			} else {
+				replyMsg = ApplyNotifyMsg{Value: value, Term: applyMsg.CommandTerm, Err: ErrNoKey}
+			}
+		} else if op.Operation == "Put" {
+			kv.DB[op.Key] = op.Value
+			replyMsg = ApplyNotifyMsg{Value: op.Value, Term: applyMsg.CommandTerm, Err: OK}
+			//DPrintf("kvserver[%d]:完成Put,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
+		} else if op.Operation == "Append" {
+			kv.DB[op.Key] += op.Value
+			replyMsg = ApplyNotifyMsg{Value: kv.DB[op.Key], Term: applyMsg.CommandTerm, Err: OK}
+			//DPrintf("kvserver[%d]:完成Append,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
+		}
+		channel, ok := kv.replyChMap[index]
 		if ok {
-			replyMsg = ApplyNotifyMsg{Value: value, Term: applyMsg.CommandTerm, Err: OK}
-			//DPrintf("kvserver[%d]:完成Get,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
-		} else {
-			replyMsg = ApplyNotifyMsg{Value: value, Term: applyMsg.CommandTerm, Err: ErrNoKey}
+			channel <- replyMsg
 		}
-	} else if command.Operation == "Put" {
-		kv.DB[command.Key] = command.Value
-		replyMsg = ApplyNotifyMsg{Value: command.Value, Term: applyMsg.CommandTerm, Err: OK}
-		//DPrintf("kvserver[%d]:完成Put,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
-	} else if command.Operation == "Append" {
-		kv.DB[command.Key] += command.Value
-		replyMsg = ApplyNotifyMsg{Value: kv.DB[command.Key], Term: applyMsg.CommandTerm, Err: OK}
-		//DPrintf("kvserver[%d]:完成Append,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
+		kv.clientMaxSeq[op.ClientId] = CommandContext{CommandId: op.CommandId, Msg: replyMsg}
+		kv.lastIncludedIndex = index
+		if kv.maxraftstate != -1 && kv.rf.GetStateSize() > kv.maxraftstate && commandIndex-kv.rf.GetSnapShotIndex() >= 20 {
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+			e.Encode(kv.DB)
+			e.Encode(kv.clientMaxSeq)
+			go kv.rf.Snapshot(commandIndex, w.Bytes())
+		}
 	}
-	channel, ok := kv.replyChMap[index]
-	if ok {
-		channel <- replyMsg
+}
+
+/**********Configuration Update*************/
+func (kv *ShardKV) configurationAction() {
+	canPerformNextConfig := true
+	kv.mu.Lock()
+	for _, shard := range kv.shards {
+		if shard.Status != Serving {
+			canPerformNextConfig = false
+			break
+		}
 	}
-	kv.clientMaxSeq[command.ClientId] = CommandContext{CommandId: command.CommandId, Msg: replyMsg}
-	kv.lastIncludedIndex = index
-	if kv.maxraftstate != -1 && kv.rf.GetStateSize() > kv.maxraftstate && commandIndex-kv.rf.GetSnapShotIndex() >= 20 {
-		w := new(bytes.Buffer)
-		e := labgob.NewEncoder(w)
-		e.Encode(kv.DB)
-		e.Encode(kv.clientMaxSeq)
-		go kv.rf.Snapshot(commandIndex, w.Bytes())
+	currConfigNum := kv.currConfig.Num
+	kv.mu.Unlock()
+	if canPerformNextConfig {
+		nextConfig := kv.sc.Query(currConfigNum + 1)
+		if nextConfig.Num == currConfigNum+1 {
+			command := Command{Configuration, nextConfig}
+			kv.Execute(command, &ApplyNotifyMsg{})
+		}
 	}
 }
 
@@ -254,7 +336,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
-
+	labgob.Register(Command{})
+	labgob.Register(shardctrler.Config{})
 	kv := new(ShardKV)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
@@ -266,6 +349,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.clientMaxSeq = make(map[int64]CommandContext)
 	kv.replyChMap = make(map[int]chan ApplyNotifyMsg)
 	kv.DB = make(map[string]string)
+	kv.shards = make(map[int]*Shard)
+	kv.sc = shardctrler.MakeClerk(ctrlers)
 
 	// Use something like this to talk to the shardctrler:
 	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
@@ -276,5 +361,15 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.readSnapShot(kv.rf.GetSnapShot())
 	// You may need initialization code here.
 	go kv.applier()
+	go kv.ticker(kv.configurationAction, 50)
 	return kv
+}
+
+func (kv *ShardKV) ticker(fn func(), timeout int) {
+	for !kv.killed() {
+		if _, isleader := kv.rf.GetState(); isleader {
+			fn()
+		}
+		time.Sleep(time.Duration(timeout) * time.Millisecond)
+	}
 }
