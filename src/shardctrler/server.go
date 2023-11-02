@@ -299,7 +299,7 @@ func distributeShards(config Config) (newShards [NShards]int) {
 	}
 	return
 }
-func deepCopy(groups map[int][]string) map[int][]string {
+func DeepCopy(groups map[int][]string) map[int][]string {
 	newGroups := make(map[int][]string)
 	for gid, servers := range groups {
 		newServers := make([]string, len(servers))
@@ -324,7 +324,7 @@ func (sc *ShardCtrler) applyCommand(applyMsg raft.ApplyMsg) {
 		newConfig := Config{}
 		lastConfig := sc.configs[len(sc.configs)-1]
 		newConfig.Num = lastConfig.Num + 1
-		newConfig.Groups = deepCopy(lastConfig.Groups)
+		newConfig.Groups = DeepCopy(lastConfig.Groups)
 		for gid, servers := range command.Servers {
 			_, ok := newConfig.Groups[gid]
 			if !ok {
@@ -346,7 +346,7 @@ func (sc *ShardCtrler) applyCommand(applyMsg raft.ApplyMsg) {
 		newConfig := Config{}
 		lastConfig := sc.configs[len(sc.configs)-1]
 		newConfig.Num = lastConfig.Num + 1
-		newConfig.Groups = deepCopy(lastConfig.Groups)
+		newConfig.Groups = DeepCopy(lastConfig.Groups)
 		for _, gId := range command.GIDs {
 			if _, ok := newConfig.Groups[gId]; ok {
 				delete(newConfig.Groups, gId)
@@ -367,7 +367,7 @@ func (sc *ShardCtrler) applyCommand(applyMsg raft.ApplyMsg) {
 		newConfig := Config{}
 		lastConfig := sc.configs[len(sc.configs)-1]
 		newConfig.Num = lastConfig.Num + 1
-		newConfig.Groups = deepCopy(lastConfig.Groups)
+		newConfig.Groups = DeepCopy(lastConfig.Groups)
 		copy(newConfig.Shards[:], lastConfig.Shards[:])
 		DPrintf("Move config.Shards:[%v]", newConfig.Shards)
 		newConfig.Shards[command.Shard] = command.GID

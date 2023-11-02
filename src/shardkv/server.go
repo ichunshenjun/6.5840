@@ -50,6 +50,7 @@ type ShardKV struct {
 	dead              int32
 	lastIncludedIndex int
 	shards            map[int]*Shard
+	lastConfig        shardctrler.Config
 	currConfig        shardctrler.Config
 	sc                *shardctrler.Clerk //此sc非shardctrler的sc
 }
@@ -116,9 +117,59 @@ func (kv *ShardKV) Execute(command Command, reply *ApplyNotifyMsg) {
 	}
 }
 
+/******tools**********/
+func NewShard(status ShardStatus) *Shard {
+	return &Shard{make(map[string]string), status}
+}
+
+func (kv *ShardKV) getAllShards(nextConfig *shardctrler.Config) []int {
+	var shardIds []int
+	for shardId, gid := range nextConfig.Shards {
+		if gid == kv.gid {
+			shardIds = append(shardIds, shardId)
+		}
+	}
+	return shardIds
+}
+
+func (kv *ShardKV) getShardIdsByStatus(status ShardStatus) map[int][]int {
+	g2s := make(map[int][]int)
+	for shardId, _ := range kv.shards {
+		if kv.shards[shardId].Status == status {
+			gid := kv.lastConfig.Shards[shardId]
+			if _, ok := g2s[gid]; !ok {
+				arr := [1]int{shardId}
+				g2s[gid] = arr[:]
+			} else {
+				g2s[gid] = append(g2s[gid], shardId)
+			}
+		}
+	}
+	return g2s
+}
+
+func (shard *Shard) deepCopy() *Shard {
+	newShard := NewShard(Serving)
+	for k, v := range shard.KV {
+		newShard.KV[k] = v
+	}
+	return newShard
+}
+
+/********************
+*********************/
+func (kv *ShardKV) canServe(shardId int) bool {
+	return kv.currConfig.Shards[shardId] == kv.gid && (kv.shards[shardId].Status == Serving || kv.shards[shardId].Status == GCing)
+}
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
+	shardId := key2shard(args.Key)
+	if !kv.canServe(shardId) {
+		reply.Err = ErrWrongGroup
+		kv.mu.Unlock()
+		return
+	}
 	lastCommandContext, ok := kv.clientMaxSeq[args.ClientId]
 	if ok {
 		if args.CommandId <= lastCommandContext.CommandId {
@@ -154,6 +205,12 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	kv.mu.Lock()
+	shardId := key2shard(args.Key)
+	if !kv.canServe(shardId) {
+		reply.Err = ErrWrongGroup
+		kv.mu.Unlock()
+		return
+	}
 	lastCommandContext, ok := kv.clientMaxSeq[args.ClientId]
 	if ok {
 		if args.CommandId <= lastCommandContext.CommandId {
@@ -163,7 +220,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		}
 	}
 	command := Command{Operation, Op{Operation: args.Op, Key: args.Key, Value: args.Value, ClientId: args.ClientId, CommandId: args.CommandId}}
-	//DPrintf("kvserver[%d]:开始raft同步key为%v,value为%v\n", kv.me, command.Key, command.Value)
+	// DPrintf("kvserver[%d]:开始raft同步key为%v,value为%v\n", kv.me, command.Key, command.Value)
 	index, term, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -233,8 +290,28 @@ func (kv *ShardKV) applier() {
 	}
 
 }
+func (kv *ShardKV) applyInsertShards(insertShardsInfo *PullShardReply) *ApplyNotifyMsg {
+	if insertShardsInfo.ConfigNum == kv.currConfig.Num {
+		for shardId, shardData := range insertShardsInfo.Shards {
+			if kv.shards[shardId].Status == Pulling {
+				kv.shards[shardId] = shardData.deepCopy()
+				kv.shards[shardId].Status = GCing
+			} else {
+				break
+			}
+		}
+		return &ApplyNotifyMsg{Err: OK, Value: ""}
+	}
+	return &ApplyNotifyMsg{Err: ErrOutDated, Value: ""}
+}
 func (kv *ShardKV) applyConfiguration(nextConfig *shardctrler.Config) *ApplyNotifyMsg {
-	return &ApplyNotifyMsg{}
+	if nextConfig.Num == kv.currConfig.Num+1 {
+		kv.updateShardStatus(nextConfig)
+		kv.lastConfig = shardctrler.Config{Num: kv.currConfig.Num, Shards: kv.currConfig.Shards, Groups: shardctrler.DeepCopy(kv.currConfig.Groups)}
+		kv.currConfig = shardctrler.Config{Num: nextConfig.Num, Shards: nextConfig.Shards, Groups: shardctrler.DeepCopy(nextConfig.Groups)}
+		return &ApplyNotifyMsg{Err: OK, Value: ""}
+	}
+	return &ApplyNotifyMsg{Err: ErrOutDated, Value: ""}
 }
 func (kv *ShardKV) applyCommand(applyMsg raft.ApplyMsg) {
 	kv.mu.Lock()
@@ -247,27 +324,35 @@ func (kv *ShardKV) applyCommand(applyMsg raft.ApplyMsg) {
 		return
 	}
 	switch command.CmdType {
+	case InsertShards:
+		insertShardsInfo := command.Data.(PullShardReply)
+		replyMsg = *kv.applyInsertShards(&insertShardsInfo)
 	case Configuration:
 		nextConfig := command.Data.(shardctrler.Config)
 		replyMsg = *kv.applyConfiguration(&nextConfig)
 	case Operation:
 		op := command.Data.(Op)
-		if op.Operation == "Get" {
-			value, ok := kv.DB[op.Key]
-			if ok {
-				replyMsg = ApplyNotifyMsg{Value: value, Term: applyMsg.CommandTerm, Err: OK}
-				//DPrintf("kvserver[%d]:完成Get,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
-			} else {
-				replyMsg = ApplyNotifyMsg{Value: value, Term: applyMsg.CommandTerm, Err: ErrNoKey}
+		shardId := key2shard(op.Key)
+		if !kv.canServe(shardId) {
+			replyMsg = ApplyNotifyMsg{Err: ErrWrongGroup, Value: ""}
+		} else {
+			if op.Operation == "Get" {
+				value, ok := kv.DB[op.Key]
+				if ok {
+					replyMsg = ApplyNotifyMsg{Value: value, Term: applyMsg.CommandTerm, Err: OK}
+					//DPrintf("kvserver[%d]:完成Get,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
+				} else {
+					replyMsg = ApplyNotifyMsg{Value: value, Term: applyMsg.CommandTerm, Err: ErrNoKey}
+				}
+			} else if op.Operation == "Put" {
+				kv.DB[op.Key] = op.Value
+				replyMsg = ApplyNotifyMsg{Value: op.Value, Term: applyMsg.CommandTerm, Err: OK}
+				//DPrintf("kvserver[%d]:完成Put,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
+			} else if op.Operation == "Append" {
+				kv.DB[op.Key] += op.Value
+				replyMsg = ApplyNotifyMsg{Value: kv.DB[op.Key], Term: applyMsg.CommandTerm, Err: OK}
+				//DPrintf("kvserver[%d]:完成Append,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
 			}
-		} else if op.Operation == "Put" {
-			kv.DB[op.Key] = op.Value
-			replyMsg = ApplyNotifyMsg{Value: op.Value, Term: applyMsg.CommandTerm, Err: OK}
-			//DPrintf("kvserver[%d]:完成Put,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
-		} else if op.Operation == "Append" {
-			kv.DB[op.Key] += op.Value
-			replyMsg = ApplyNotifyMsg{Value: kv.DB[op.Key], Term: applyMsg.CommandTerm, Err: OK}
-			//DPrintf("kvserver[%d]:完成Append,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
 		}
 		channel, ok := kv.replyChMap[index]
 		if ok {
@@ -286,6 +371,7 @@ func (kv *ShardKV) applyCommand(applyMsg raft.ApplyMsg) {
 }
 
 /**********Configuration Update*************/
+// 拉取新配置
 func (kv *ShardKV) configurationAction() {
 	canPerformNextConfig := true
 	kv.mu.Lock()
@@ -304,6 +390,85 @@ func (kv *ShardKV) configurationAction() {
 			kv.Execute(command, &ApplyNotifyMsg{})
 		}
 	}
+}
+
+type PullShardArgs struct {
+	ConfigNum int
+	ShardIds  []int
+}
+type PullShardReply struct {
+	Err       Err
+	ConfigNum int
+	Shards    map[int]*Shard
+}
+
+// 根据新配置修改分片状态
+func (kv *ShardKV) updateShardStatus(nextConfig *shardctrler.Config) {
+	if nextConfig.Num == 1 {
+		shardIds := kv.getAllShards(nextConfig)
+		for _, shardId := range shardIds {
+			kv.shards[shardId] = NewShard(Serving)
+		}
+		return
+	}
+	nextShardIds := kv.getAllShards(nextConfig)
+	currShardIds := kv.getAllShards(&kv.currConfig)
+	for _, currShardId := range currShardIds {
+		if nextConfig.Shards[currShardId] != kv.gid {
+			kv.shards[currShardId].Status = BePulling
+		}
+	}
+	for _, nextShardId := range nextShardIds {
+		if kv.currConfig.Shards[nextShardId] != kv.gid {
+			kv.shards[nextShardId] = NewShard(Pulling)
+		}
+	}
+}
+
+/**********Shard Migration*************/
+func (kv *ShardKV) migrationAction() {
+	kv.mu.Lock()
+	g2s := kv.getShardIdsByStatus(Pulling)
+	var wg sync.WaitGroup
+	for gid, shardIds := range g2s {
+		wg.Add(1)
+		go func(servers []string, configNum int, shardIds []int) {
+			defer wg.Done()
+			args := PullShardArgs{
+				ConfigNum: configNum,
+				ShardIds:  shardIds,
+			}
+			for _, server := range servers {
+				var reply PullShardReply
+				srv := kv.make_end(server)
+				if srv.Call("ShardKV.PullShardsData", &args, &reply) && reply.Err == OK {
+					command := Command{InsertShards, reply}
+					kv.Execute(command, &ApplyNotifyMsg{})
+				}
+			}
+		}(kv.lastConfig.Groups[gid], kv.currConfig.Num, shardIds)
+	}
+	kv.mu.Unlock()
+	wg.Wait()
+}
+func (kv *ShardKV) PullShardsData(args *PullShardArgs, reply *PullShardReply) {
+	if _, isleader := kv.rf.GetState(); !isleader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	kv.mu.Lock()
+	if kv.currConfig.Num < args.ConfigNum {
+		reply.Err = ErrNotReady
+		kv.mu.Unlock()
+		kv.configurationAction()
+		return
+	}
+	reply.Shards = make(map[int]*Shard)
+	for _, shardId := range args.ShardIds {
+		reply.Shards[shardId] = kv.shards[shardId].deepCopy()
+	}
+	reply.ConfigNum, reply.Err = args.ConfigNum, OK
+	kv.mu.Unlock()
 }
 
 // servers[] contains the ports of the servers in this group.
@@ -335,6 +500,8 @@ func (kv *ShardKV) configurationAction() {
 func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int, gid int, ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.ClientEnd) *ShardKV {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
+	labgob.Register(PullShardArgs{})
+	labgob.Register(PullShardReply{})
 	labgob.Register(Op{})
 	labgob.Register(Command{})
 	labgob.Register(shardctrler.Config{})
@@ -355,13 +522,14 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// Use something like this to talk to the shardctrler:
 	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 
-	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.applyCh = make(chan raft.ApplyMsg, 5)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	kv.readSnapShot(kv.rf.GetSnapShot())
 	// You may need initialization code here.
 	go kv.applier()
 	go kv.ticker(kv.configurationAction, 50)
+	go kv.ticker(kv.migrationAction, 50)
 	return kv
 }
 
