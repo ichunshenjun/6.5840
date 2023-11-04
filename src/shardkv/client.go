@@ -78,6 +78,7 @@ func (ck *Clerk) Get(key string) string {
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+		DPrintf("Get shard:%v,gid:%v", shard, gid)
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
@@ -85,11 +86,12 @@ func (ck *Clerk) Get(key string) string {
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-					DPrintf("srv[%v]:Get finish,reply=[%v]", srv, reply)
+					DPrintf("servers[%v]:Get finish,reply=[%v]", servers[si], reply)
 					ck.lastAppliedCommandId = commandId
 					return reply.Value
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
+					// DPrintf("servers[%v]:Get failed", servers[si])
 					break
 				}
 				// ... not ok, or ErrWrongLeader
