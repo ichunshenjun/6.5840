@@ -13,7 +13,9 @@ import (
 	"6.5840/shardctrler"
 )
 
-const Debug = true
+const Debug = false
+
+// const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -49,6 +51,7 @@ type ShardKV struct {
 	DB                map[string]string
 	dead              int32
 	lastIncludedIndex int
+	lastSnapshot      int
 	shards            map[int]*Shard
 	lastConfig        shardctrler.Config
 	currConfig        shardctrler.Config
@@ -318,7 +321,7 @@ func (kv *ShardKV) applier() {
 func (kv *ShardKV) applyCommand(applyMsg raft.ApplyMsg) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	commandIndex := applyMsg.CommandIndex
+	// commandIndex := applyMsg.CommandIndex
 	command := applyMsg.Command.(Command)
 	index := applyMsg.CommandIndex
 	replyMsg := ApplyNotifyMsg{}
@@ -360,24 +363,24 @@ func (kv *ShardKV) applyCommand(applyMsg raft.ApplyMsg) {
 				replyMsg = ApplyNotifyMsg{Value: kv.DB[op.Key], Term: applyMsg.CommandTerm, Err: OK}
 				//DPrintf("kvserver[%d]:完成Append,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
 			}
-		}
-		channel, ok := kv.replyChMap[index]
-		if ok {
-			channel <- replyMsg
-		}
-		kv.clientMaxSeq[op.ClientId] = CommandContext{CommandId: op.CommandId, Msg: replyMsg}
-		kv.lastIncludedIndex = index
-		if kv.maxraftstate != -1 && kv.rf.GetStateSize() > kv.maxraftstate && commandIndex-kv.rf.GetSnapShotIndex() >= 20 {
-			w := new(bytes.Buffer)
-			e := labgob.NewEncoder(w)
-			e.Encode(kv.shards)
-			e.Encode(kv.lastConfig)
-			e.Encode(kv.currConfig)
-			e.Encode(kv.clientMaxSeq)
-			DPrintf("kuaizhao.............")
-			go kv.rf.Snapshot(commandIndex, w.Bytes())
+			kv.clientMaxSeq[op.ClientId] = CommandContext{CommandId: op.CommandId, Msg: replyMsg}
 		}
 	}
+	channel, ok := kv.replyChMap[index]
+	if ok {
+		channel <- replyMsg
+	}
+	kv.lastIncludedIndex = index
+	// if kv.maxraftstate != -1 && kv.rf.GetStateSize() > kv.maxraftstate && commandIndex-kv.rf.GetSnapShotIndex() >= 20 {
+	// 	w := new(bytes.Buffer)
+	// 	e := labgob.NewEncoder(w)
+	// 	e.Encode(kv.shards)
+	// 	e.Encode(kv.lastConfig)
+	// 	e.Encode(kv.currConfig)
+	// 	e.Encode(kv.clientMaxSeq)
+	// 	DPrintf("kuaizhao.............")
+	// 	go kv.rf.Snapshot(commandIndex, w.Bytes())
+	// }
 }
 
 /**********Configuration Update*************/
@@ -563,6 +566,43 @@ func (kv *ShardKV) applyDeleteShards(deleteShardsInfo *DeleteShardArgs) *ApplyNo
 	return &ApplyNotifyMsg{Err: OK, Value: ""}
 }
 
+/**********SnapShot*************/
+func (kv *ShardKV) snapshoter() {
+	for !kv.killed() {
+		kv.mu.Lock()
+		if kv.isNeedSnapShot() {
+			kv.takeSnapshot(kv.lastIncludedIndex)
+			kv.lastSnapshot = kv.lastIncludedIndex
+		}
+		kv.mu.Unlock()
+		time.Sleep(time.Duration(10) * time.Millisecond)
+	}
+}
+func (kv *ShardKV) isNeedSnapShot() bool {
+	for _, shard := range kv.shards {
+		if shard.Status == BePulling {
+			return false
+		}
+	}
+	if kv.maxraftstate != -1 {
+		threshold := int(0.8 * float32(kv.maxraftstate))
+		if kv.rf.GetStateSize() > threshold || kv.lastIncludedIndex > kv.lastSnapshot+3 {
+			return true
+		}
+	}
+	return false
+}
+func (kv *ShardKV) takeSnapshot(commandIndex int) {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.shards)
+	e.Encode(kv.lastConfig)
+	e.Encode(kv.currConfig)
+	e.Encode(kv.clientMaxSeq)
+	DPrintf("kuaizhao.............")
+	go kv.rf.Snapshot(commandIndex, w.Bytes())
+}
+
 // servers[] contains the ports of the servers in this group.
 //
 // me is the index of the current server in servers[].
@@ -612,7 +652,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.DB = make(map[string]string)
 	kv.shards = make(map[int]*Shard)
 	kv.sc = shardctrler.MakeClerk(ctrlers)
-
+	kv.lastIncludedIndex = 0
+	kv.lastSnapshot = 0
 	// Use something like this to talk to the shardctrler:
 	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 
@@ -622,6 +663,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.readSnapShot(kv.rf.GetSnapShot())
 	// You may need initialization code here.
 	go kv.applier()
+	go kv.snapshoter()
 	go kv.ticker(kv.configurationAction, 50)
 	go kv.ticker(kv.migrationAction, 50)
 	go kv.ticker(kv.gcAction, 50)
