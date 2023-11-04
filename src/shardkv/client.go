@@ -86,7 +86,7 @@ func (ck *Clerk) Get(key string) string {
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-					DPrintf("servers[%v]:Get finish,reply=[%v]", servers[si], reply)
+					// DPrintf("servers[%v]:Get finish,reply=[%v]", servers[si], reply)
 					ck.lastAppliedCommandId = commandId
 					return reply.Value
 				}

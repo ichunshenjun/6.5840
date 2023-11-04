@@ -12,6 +12,7 @@ import (
 
 	"6.5840/models"
 	"6.5840/porcupine"
+	"6.5840/raft"
 )
 
 const linearizabilityCheckTimeout = 1 * time.Second
@@ -170,12 +171,13 @@ func TestSnapshot(t *testing.T) {
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
-
+	raft.DPrintf("fuck............")
 	cfg.join(1)
 	cfg.join(2)
 	cfg.leave(0)
 
 	for i := 0; i < n; i++ {
+		raft.DPrintf("fuck1111............")
 		check(t, ck, ka[i], va[i])
 		x := randstring(20)
 		ck.Append(ka[i], x)

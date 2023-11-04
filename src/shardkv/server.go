@@ -131,6 +131,7 @@ func (kv *ShardKV) Execute(command Command, reply *ApplyNotifyMsg) {
 	case <-time.After(500 * time.Millisecond):
 		reply.Err = ErrTimeout
 	}
+	go kv.CloseChan(index)
 }
 
 /******tools**********/
@@ -140,7 +141,7 @@ func NewShard(status ShardStatus) *Shard {
 
 func (kv *ShardKV) getAllShards(nextConfig *shardctrler.Config) []int {
 	var shardIds []int
-	DPrintf("G%+v {S%+v},getAllShards:nextConfig:%v,kv.gid:%d", kv.gid, kv.me, nextConfig, kv.gid)
+	// DPrintf("G%+v {S%+v},getAllShards:nextConfig:%v,kv.gid:%d", kv.gid, kv.me, nextConfig, kv.gid)
 	for shardId, gid := range nextConfig.Shards {
 		if gid == kv.gid {
 			shardIds = append(shardIds, shardId)
@@ -174,6 +175,17 @@ func (shard *Shard) deepCopy() *Shard {
 	return newShard
 }
 
+func (kv *ShardKV) CloseChan(index int) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	ch, ok := kv.replyChMap[index]
+	if !ok {
+		return
+	}
+	close(ch)
+	delete(kv.replyChMap, index)
+}
+
 /********************
 *********************/
 func (kv *ShardKV) canServe(shardId int) bool {
@@ -198,28 +210,32 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 			return
 		}
 	}
-	command := Command{Operation, Op{Operation: args.Op, Key: args.Key, ClientId: args.ClientId, CommandId: args.CommandId}}
-	index, term, isLeader := kv.rf.Start(command)
-	// DPrintf("kvserver[%d]:开始raft同步key为%v,value为%v\n", kv.me, command.Data.(Op).Key, command.Data.(Op).Value)
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		kv.mu.Unlock()
-		return
-	}
-	replyCh := make(chan ApplyNotifyMsg, 1)
-	kv.replyChMap[index] = replyCh
 	kv.mu.Unlock()
-	select {
-	case replyMsg := <-replyCh:
-		if term == replyMsg.Term {
-			reply.Err = replyMsg.Err
-			reply.Value = replyMsg.Value
-		} else {
-			reply.Err = ErrWrongLeader
-		}
-	case <-time.After(500 * time.Millisecond):
-		reply.Err = ErrTimeout
-	}
+	command := Command{Operation, Op{Operation: args.Op, Key: args.Key, ClientId: args.ClientId, CommandId: args.CommandId}}
+	var replyMsg ApplyNotifyMsg
+	kv.Execute(command, &replyMsg)
+	reply.Err, reply.Value = replyMsg.Err, replyMsg.Value
+	// index, term, isLeader := kv.rf.Start(command)
+	// // DPrintf("kvserver[%d]:开始raft同步key为%v,value为%v\n", kv.me, command.Data.(Op).Key, command.Data.(Op).Value)
+	// if !isLeader {
+	// 	reply.Err = ErrWrongLeader
+	// 	kv.mu.Unlock()
+	// 	return
+	// }
+	// replyCh := make(chan ApplyNotifyMsg, 1)
+	// kv.replyChMap[index] = replyCh
+	// kv.mu.Unlock()
+	// select {
+	// case replyMsg := <-replyCh:
+	// 	if term == replyMsg.Term {
+	// 		reply.Err = replyMsg.Err
+	// 		reply.Value = replyMsg.Value
+	// 	} else {
+	// 		reply.Err = ErrWrongLeader
+	// 	}
+	// case <-time.After(500 * time.Millisecond):
+	// 	reply.Err = ErrTimeout
+	// }
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -240,28 +256,32 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			return
 		}
 	}
-	command := Command{Operation, Op{Operation: args.Op, Key: args.Key, Value: args.Value, ClientId: args.ClientId, CommandId: args.CommandId}}
-	// DPrintf("kvserver[%d]:开始raft同步key为%v,value为%v\n", kv.me, command.Key, command.Value)
-	index, term, isLeader := kv.rf.Start(command)
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		kv.mu.Unlock()
-		return
-	}
-	replyCh := make(chan ApplyNotifyMsg, 1)
-	kv.replyChMap[index] = replyCh
 	kv.mu.Unlock()
-	select {
-	case replyMsg := <-replyCh:
-		if term == replyMsg.Term {
-			//DPrintf("PutAppend term为%d,回复的term为%d,回复的value为%v", term, replyMsg.Term, replyMsg.Value)
-			reply.Err = replyMsg.Err
-		} else {
-			reply.Err = ErrWrongLeader
-		}
-	case <-time.After(500 * time.Millisecond):
-		reply.Err = ErrTimeout
-	}
+	command := Command{Operation, Op{Operation: args.Op, Key: args.Key, Value: args.Value, ClientId: args.ClientId, CommandId: args.CommandId}}
+	var replyMsg ApplyNotifyMsg
+	kv.Execute(command, &replyMsg)
+	reply.Err = replyMsg.Err
+	// // DPrintf("kvserver[%d]:开始raft同步key为%v,value为%v\n", kv.me, command.Key, command.Value)
+	// index, term, isLeader := kv.rf.Start(command)
+	// if !isLeader {
+	// 	reply.Err = ErrWrongLeader
+	// 	kv.mu.Unlock()
+	// 	return
+	// }
+	// replyCh := make(chan ApplyNotifyMsg, 1)
+	// kv.replyChMap[index] = replyCh
+	// kv.mu.Unlock()
+	// select {
+	// case replyMsg := <-replyCh:
+	// 	if term == replyMsg.Term {
+	// 		//DPrintf("PutAppend term为%d,回复的term为%d,回复的value为%v", term, replyMsg.Term, replyMsg.Value)
+	// 		reply.Err = replyMsg.Err
+	// 	} else {
+	// 		reply.Err = ErrWrongLeader
+	// 	}
+	// case <-time.After(500 * time.Millisecond):
+	// 	reply.Err = ErrTimeout
+	// }
 }
 
 // the tester calls Kill() when a ShardKV instance won't
@@ -305,13 +325,18 @@ func (kv *ShardKV) applier() {
 			if applyMsg.CommandValid {
 				kv.applyCommand(applyMsg)
 			} else if applyMsg.SnapshotValid {
+				kv.mu.Lock()
 				if applyMsg.SnapshotIndex <= kv.lastIncludedIndex {
+					kv.mu.Unlock()
 					return
 				} else {
 					kv.lastIncludedIndex = applyMsg.SnapshotIndex
+					kv.mu.Unlock()
 					kv.readSnapShot(applyMsg.Snapshot)
 				}
 			}
+		default:
+			time.Sleep(time.Duration(5) * time.Millisecond)
 		}
 
 	}
@@ -337,34 +362,40 @@ func (kv *ShardKV) applyCommand(applyMsg raft.ApplyMsg) {
 		replyMsg = *kv.applyInsertShards(&insertShardsInfo)
 	case Configuration:
 		nextConfig := command.Data.(shardctrler.Config)
-		DPrintf("G%+v {S%+v},applyCommand:nextConfig:%v", kv.gid, kv.me, nextConfig)
+		// DPrintf("G%+v {S%+v},applyCommand:nextConfig:%v", kv.gid, kv.me, nextConfig)
 		replyMsg = *kv.applyConfiguration(&nextConfig)
-	case Operation:
+	case EmptyEntry:
+		replyMsg = *kv.applyEmptyEntry()
+	default:
 		op := command.Data.(Op)
 		shardId := key2shard(op.Key)
 		if !kv.canServe(shardId) {
 			DPrintf("kv[%v]:Get无法服务了!!!!!!!!!!!!!!!", kv.me)
 			replyMsg = ApplyNotifyMsg{Err: ErrWrongGroup, Value: ""}
 		} else {
-			if op.Operation == "Get" {
-				value, ok := kv.shards[shardId].KV[op.Key]
-				if ok {
-					replyMsg = ApplyNotifyMsg{Value: value, Term: applyMsg.CommandTerm, Err: OK}
-					//DPrintf("kvserver[%d]:完成Get,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
-				} else {
-					replyMsg = ApplyNotifyMsg{Value: value, Term: applyMsg.CommandTerm, Err: ErrNoKey}
+			if result, ok := kv.clientMaxSeq[op.ClientId]; ok && result.CommandId >= op.CommandId {
+				DPrintf("shardkv[%d][%d]: 该命令已被应用过,applyMsg: %v, requestId: %v\n", kv.gid, kv.me, applyMsg, op.CommandId)
+			} else {
+				if op.Operation == "Get" {
+					value, ok := kv.shards[shardId].KV[op.Key]
+					if ok {
+						replyMsg = ApplyNotifyMsg{Value: value, Term: applyMsg.CommandTerm, Err: OK}
+						//DPrintf("kvserver[%d]:完成Get,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
+					} else {
+						replyMsg = ApplyNotifyMsg{Value: value, Term: applyMsg.CommandTerm, Err: ErrNoKey}
+					}
+				} else if op.Operation == "Put" {
+					kv.shards[shardId].KV[op.Key] = op.Value
+					replyMsg = ApplyNotifyMsg{Value: op.Value, Term: applyMsg.CommandTerm, Err: OK}
+					//DPrintf("kvserver[%d]:完成Put,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
+				} else if op.Operation == "Append" {
+					kv.shards[shardId].KV[op.Key] += op.Value
+					replyMsg = ApplyNotifyMsg{Value: kv.shards[shardId].KV[op.Key], Term: applyMsg.CommandTerm, Err: OK}
+					//DPrintf("kvserver[%d]:完成Append,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
 				}
-			} else if op.Operation == "Put" {
-				kv.shards[shardId].KV[op.Key] = op.Value
-				replyMsg = ApplyNotifyMsg{Value: op.Value, Term: applyMsg.CommandTerm, Err: OK}
-				//DPrintf("kvserver[%d]:完成Put,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
-			} else if op.Operation == "Append" {
-				kv.shards[shardId].KV[op.Key] += op.Value
-				replyMsg = ApplyNotifyMsg{Value: kv.DB[op.Key], Term: applyMsg.CommandTerm, Err: OK}
-				//DPrintf("kvserver[%d]:完成Append,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
 			}
-			kv.clientMaxSeq[op.ClientId] = CommandContext{CommandId: op.CommandId, Msg: replyMsg}
 		}
+		kv.clientMaxSeq[op.ClientId] = CommandContext{CommandId: op.CommandId, Msg: replyMsg}
 	}
 	channel, ok := kv.replyChMap[index]
 	if ok {
@@ -386,8 +417,8 @@ func (kv *ShardKV) applyCommand(applyMsg raft.ApplyMsg) {
 /**********Configuration Update*************/
 // 拉取新配置
 func (kv *ShardKV) configurationAction() {
-	canPerformNextConfig := true
 	kv.mu.Lock()
+	canPerformNextConfig := true
 	for _, shard := range kv.shards {
 		if shard.Status != Serving {
 			// DPrintf("G%+v {S%+v},shard.Status:%v", kv.gid, kv.me, shard.Status)
@@ -396,14 +427,16 @@ func (kv *ShardKV) configurationAction() {
 		}
 	}
 	currConfigNum := kv.currConfig.Num
-	kv.mu.Unlock()
 	if canPerformNextConfig {
 		nextConfig := kv.sc.Query(currConfigNum + 1)
 		DPrintf("G%+v {S%+v},configurationAction:nextConfig:[%v],currConfig:[%v],kv.shards:[%v],kv.gid:%d", kv.gid, kv.me, nextConfig, kv.currConfig, kv.shards, kv.gid)
+		kv.mu.Unlock()
 		if nextConfig.Num == currConfigNum+1 {
 			command := Command{Configuration, nextConfig}
 			kv.Execute(command, &ApplyNotifyMsg{})
 		}
+	} else {
+		kv.mu.Unlock()
 	}
 }
 
@@ -586,7 +619,7 @@ func (kv *ShardKV) isNeedSnapShot() bool {
 	}
 	if kv.maxraftstate != -1 {
 		threshold := int(0.8 * float32(kv.maxraftstate))
-		if kv.rf.GetStateSize() > threshold || kv.lastIncludedIndex > kv.lastSnapshot+3 {
+		if kv.maxraftstate != -1 && kv.rf.GetStateSize() > threshold || kv.lastIncludedIndex > kv.lastSnapshot+3 {
 			return true
 		}
 	}
@@ -601,6 +634,17 @@ func (kv *ShardKV) takeSnapshot(commandIndex int) {
 	e.Encode(kv.clientMaxSeq)
 	DPrintf("kuaizhao.............")
 	go kv.rf.Snapshot(commandIndex, w.Bytes())
+}
+
+/**********Empty Entry Check *************/
+func (kv *ShardKV) checkEntryInCurrentTermAction() {
+	if !kv.rf.HasLogInCurrentTerm() {
+		command := Command{EmptyEntry, nil}
+		kv.Execute(command, &ApplyNotifyMsg{})
+	}
+}
+func (kv *ShardKV) applyEmptyEntry() *ApplyNotifyMsg {
+	return &ApplyNotifyMsg{Err: OK, Value: ""}
 }
 
 // servers[] contains the ports of the servers in this group.
@@ -667,6 +711,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	go kv.ticker(kv.configurationAction, 50)
 	go kv.ticker(kv.migrationAction, 50)
 	go kv.ticker(kv.gcAction, 50)
+	go kv.ticker(kv.checkEntryInCurrentTermAction, 100)
 	return kv
 }
 

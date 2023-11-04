@@ -127,6 +127,24 @@ func (rf *Raft) GetSnapShotIndex() int {
 	return rf.lastIncludedIndex
 }
 
+// lab4B
+func (rf *Raft) HasLogInCurrentTerm() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for i := len(rf.log) - 1; i > 0; i-- {
+		if rf.log[i].CurrentTerm > rf.currentTerm {
+			continue
+		}
+		if rf.log[i].CurrentTerm == rf.currentTerm {
+			return true
+		}
+		if rf.log[i].CurrentTerm < rf.currentTerm {
+			break
+		}
+	}
+	return false
+}
+
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
