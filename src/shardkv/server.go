@@ -13,9 +13,9 @@ import (
 	"6.5840/shardctrler"
 )
 
-const Debug = false
+// const Debug = false
 
-// const Debug = true
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -47,8 +47,6 @@ type ShardKV struct {
 
 	// Your definitions here.
 	replyChMap        map[int]chan ApplyNotifyMsg
-	clientMaxSeq      map[int64]CommandContext
-	DB                map[string]string
 	dead              int32
 	lastIncludedIndex int
 	lastSnapshot      int
@@ -68,8 +66,9 @@ const (
 )
 
 type Shard struct {
-	KV     map[string]string
-	Status ShardStatus
+	KV           map[string]string
+	Status       ShardStatus
+	ClientMaxSeq map[int64]CommandContext
 }
 type ApplyNotifyMsg struct {
 	Err   Err
@@ -114,6 +113,7 @@ func (kv *ShardKV) Execute(command Command, reply *ApplyNotifyMsg) {
 	index, term, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
+		DPrintf("G%+v {S%+v} Execute:isLeader:%v", kv.gid, kv.me, isLeader)
 		return
 	}
 	kv.mu.Lock()
@@ -127,6 +127,7 @@ func (kv *ShardKV) Execute(command Command, reply *ApplyNotifyMsg) {
 			reply.Value = replyMsg.Value
 		} else {
 			reply.Err = ErrWrongLeader
+			DPrintf("G%+v {S%+v} Execute:reply.Err:%v", kv.gid, kv.me, reply.Err)
 		}
 	case <-time.After(500 * time.Millisecond):
 		reply.Err = ErrTimeout
@@ -136,7 +137,7 @@ func (kv *ShardKV) Execute(command Command, reply *ApplyNotifyMsg) {
 
 /******tools**********/
 func NewShard(status ShardStatus) *Shard {
-	return &Shard{make(map[string]string), status}
+	return &Shard{make(map[string]string), status, make(map[int64]CommandContext)}
 }
 
 func (kv *ShardKV) getAllShards(nextConfig *shardctrler.Config) []int {
@@ -163,7 +164,9 @@ func (kv *ShardKV) getShardIdsByStatus(status ShardStatus) map[int][]int {
 			}
 		}
 	}
-	DPrintf("G%+v {S%+v},getShardIdsByStatus:kv.lastConfig.Shards:%v,kv.currCOnfig.Shards:%v,g2s:%v", kv.gid, kv.me, kv.lastConfig.Shards, kv.currConfig.Shards, g2s)
+	if kv.gid == 102 && kv.me == 0 {
+		DPrintf("G%+v {S%+v},getShardIdsByStatus:kv.lastConfig.Shards:%v,kv.currCOnfig.Shards:%v,g2s:%v", kv.gid, kv.me, kv.lastConfig.Shards, kv.currConfig.Shards, g2s)
+	}
 	return g2s
 }
 
@@ -171,6 +174,9 @@ func (shard *Shard) deepCopy() *Shard {
 	newShard := NewShard(Serving)
 	for k, v := range shard.KV {
 		newShard.KV[k] = v
+	}
+	for id, context := range shard.ClientMaxSeq {
+		newShard.ClientMaxSeq[id] = context
 	}
 	return newShard
 }
@@ -189,6 +195,11 @@ func (kv *ShardKV) CloseChan(index int) {
 /********************
 *********************/
 func (kv *ShardKV) canServe(shardId int) bool {
+	if kv.gid == 102 && kv.me == 0 {
+		for shardId, shard := range kv.shards {
+			DPrintf("G%+v {S%+v} canServe: kv.shards[%d]:%v", kv.gid, kv.me, shardId, shard.Status)
+		}
+	}
 	return kv.currConfig.Shards[shardId] == kv.gid && (kv.shards[shardId].Status == Serving || kv.shards[shardId].Status == GCing)
 }
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
@@ -201,9 +212,9 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Unlock()
 		return
 	}
-	lastCommandContext, ok := kv.clientMaxSeq[args.ClientId]
+	lastCommandContext, ok := kv.shards[shardId].ClientMaxSeq[args.ClientId]
 	if ok {
-		if args.CommandId <= lastCommandContext.CommandId {
+		if args.CommandId <= lastCommandContext.CommandId && args.Op != "Get" {
 			reply.Err = lastCommandContext.Msg.Err
 			reply.Value = lastCommandContext.Msg.Value
 			kv.mu.Unlock()
@@ -248,7 +259,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Unlock()
 		return
 	}
-	lastCommandContext, ok := kv.clientMaxSeq[args.ClientId]
+	lastCommandContext, ok := kv.shards[shardId].ClientMaxSeq[args.ClientId]
 	if ok {
 		if args.CommandId <= lastCommandContext.CommandId {
 			reply.Err = lastCommandContext.Msg.Err
@@ -298,26 +309,6 @@ func (kv *ShardKV) killed() bool {
 	return z == 1
 }
 
-func (kv *ShardKV) readSnapShot(snapshot []byte) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	if snapshot == nil || len(snapshot) < 1 {
-		return
-	}
-	r := bytes.NewBuffer(snapshot)
-	d := labgob.NewDecoder(r)
-	var shards map[int]*Shard
-	var lastConfig, currConfig shardctrler.Config
-	var clientMaxSeq map[int64]CommandContext
-	if d.Decode(&shards) != nil || d.Decode(lastConfig) != nil || d.Decode(currConfig) != nil || d.Decode(&clientMaxSeq) != nil {
-		DPrintf("安装日志失败")
-	} else {
-		kv.shards = shards
-		kv.lastConfig = lastConfig
-		kv.currConfig = currConfig
-		kv.clientMaxSeq = clientMaxSeq
-	}
-}
 func (kv *ShardKV) applier() {
 	for !kv.killed() {
 		select {
@@ -330,9 +321,9 @@ func (kv *ShardKV) applier() {
 					kv.mu.Unlock()
 					return
 				} else {
+					kv.readSnapShot(applyMsg.Snapshot)
 					kv.lastIncludedIndex = applyMsg.SnapshotIndex
 					kv.mu.Unlock()
-					kv.readSnapShot(applyMsg.Snapshot)
 				}
 			}
 		default:
@@ -373,7 +364,8 @@ func (kv *ShardKV) applyCommand(applyMsg raft.ApplyMsg) {
 			DPrintf("kv[%v]:Get无法服务了!!!!!!!!!!!!!!!", kv.me)
 			replyMsg = ApplyNotifyMsg{Err: ErrWrongGroup, Value: ""}
 		} else {
-			if result, ok := kv.clientMaxSeq[op.ClientId]; ok && result.CommandId >= op.CommandId {
+			if result, ok := kv.shards[shardId].ClientMaxSeq[op.ClientId]; ok && result.CommandId >= op.CommandId && op.Operation != "Get" {
+				replyMsg = result.Msg
 				DPrintf("shardkv[%d][%d]: 该命令已被应用过,applyMsg: %v, requestId: %v\n", kv.gid, kv.me, applyMsg, op.CommandId)
 			} else {
 				if op.Operation == "Get" {
@@ -389,13 +381,17 @@ func (kv *ShardKV) applyCommand(applyMsg raft.ApplyMsg) {
 					replyMsg = ApplyNotifyMsg{Value: op.Value, Term: applyMsg.CommandTerm, Err: OK}
 					//DPrintf("kvserver[%d]:完成Put,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
 				} else if op.Operation == "Append" {
-					kv.shards[shardId].KV[op.Key] += op.Value
+					if value, ok := kv.shards[shardId].KV[op.Key]; ok {
+						kv.shards[shardId].KV[op.Key] = value + op.Value
+					} else {
+						kv.shards[shardId].KV[op.Key] = op.Value
+					}
 					replyMsg = ApplyNotifyMsg{Value: kv.shards[shardId].KV[op.Key], Term: applyMsg.CommandTerm, Err: OK}
 					//DPrintf("kvserver[%d]:完成Append,key为%v,value为%v,commandIndex为%v", kv.me, command.Key, command.Value, commandIndex)
 				}
+				kv.shards[shardId].ClientMaxSeq[op.ClientId] = CommandContext{CommandId: op.CommandId, Msg: replyMsg}
 			}
 		}
-		kv.clientMaxSeq[op.ClientId] = CommandContext{CommandId: op.CommandId, Msg: replyMsg}
 	}
 	channel, ok := kv.replyChMap[index]
 	if ok {
@@ -429,7 +425,9 @@ func (kv *ShardKV) configurationAction() {
 	currConfigNum := kv.currConfig.Num
 	if canPerformNextConfig {
 		nextConfig := kv.sc.Query(currConfigNum + 1)
-		DPrintf("G%+v {S%+v},configurationAction:nextConfig:[%v],currConfig:[%v],kv.shards:[%v],kv.gid:%d", kv.gid, kv.me, nextConfig, kv.currConfig, kv.shards, kv.gid)
+		if kv.gid == 102 && kv.me == 0 {
+			DPrintf("G%+v {S%+v},configurationAction:nextConfig:[%v],currConfig:[%v],kv.shards:[%v],kv.gid:%d", kv.gid, kv.me, nextConfig, kv.currConfig, kv.shards, kv.gid)
+		}
 		kv.mu.Unlock()
 		if nextConfig.Num == currConfigNum+1 {
 			command := Command{Configuration, nextConfig}
@@ -473,14 +471,18 @@ func (kv *ShardKV) updateShardStatus(nextConfig *shardctrler.Config) {
 			kv.shards[nextShardId] = NewShard(Pulling)
 		}
 	}
-	DPrintf("G%+v {S%+v},updateShardStatus,nextShardIds:%v,currShardIds:%v,kv.shards:%v", kv.gid, kv.me, nextShardIds, currShardIds, kv.shards)
+	if kv.gid == 102 && kv.me == 0 {
+		DPrintf("G%+v {S%+v},updateShardStatus,nextShardIds:%v,currShardIds:%v,kv.shards:%v", kv.gid, kv.me, nextShardIds, currShardIds, kv.shards)
+	}
 }
 
 /**********Shard Migration*************/
 func (kv *ShardKV) migrationAction() {
 	kv.mu.Lock()
 	g2s := kv.getShardIdsByStatus(Pulling)
-	DPrintf("G%+v {S%+v},migrationAction:g2s:%v", kv.gid, kv.me, g2s)
+	if kv.gid == 102 && kv.me == 0 {
+		DPrintf("G%+v {S%+v},migrationAction:g2s:%v", kv.gid, kv.me, g2s)
+	}
 	var wg sync.WaitGroup
 	for gid, shardIds := range g2s {
 		wg.Add(1)
@@ -544,6 +546,9 @@ func (kv *ShardKV) gcAction() {
 	kv.mu.Lock()
 	g2s := kv.getShardIdsByStatus(GCing)
 	var wg sync.WaitGroup
+	if kv.gid == 102 && kv.me == 0 {
+		DPrintf("G%+v {S%+v},gcAction:g2s:%v", kv.gid, kv.me, g2s)
+	}
 	for gid, shardIds := range g2s {
 		wg.Add(1)
 		go func(servers []string, configNum int, shardIds []int) {
@@ -581,8 +586,17 @@ func (kv *ShardKV) DeleteShardsData(args *DeleteShardArgs, reply *DeleteShardRep
 	command := Command{DeleteShards, *args}
 	kv.Execute(command, &replyMsg)
 	reply.Err = replyMsg.Err
+	if kv.gid == 100 || kv.gid == 101 {
+		_, isLeader := kv.rf.GetState()
+		DPrintf("G%+v {S%+v} DeleteShardsData:isLeader:%v, args: %+v reply: %+v", kv.gid, kv.me, isLeader, args, reply)
+	}
 }
 func (kv *ShardKV) applyDeleteShards(deleteShardsInfo *DeleteShardArgs) *ApplyNotifyMsg {
+	if kv.gid == 102 && kv.me == 0 {
+		for shardId, shard := range kv.shards {
+			DPrintf("G%+v {S%+v} applyDeleteShards: kv.shards[%d]:%v,deleteShardsInfo:%v", kv.gid, kv.me, shardId, shard.Status, deleteShardsInfo)
+		}
+	}
 	if deleteShardsInfo.ConfigNum == kv.currConfig.Num {
 		for _, shardId := range deleteShardsInfo.ShardIds {
 			shard := kv.shards[shardId]
@@ -628,12 +642,32 @@ func (kv *ShardKV) isNeedSnapShot() bool {
 func (kv *ShardKV) takeSnapshot(commandIndex int) {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(kv.shards)
-	e.Encode(kv.lastConfig)
-	e.Encode(kv.currConfig)
-	e.Encode(kv.clientMaxSeq)
-	DPrintf("kuaizhao.............")
-	go kv.rf.Snapshot(commandIndex, w.Bytes())
+	if e.Encode(kv.shards) != nil || e.Encode(kv.lastConfig) != nil || e.Encode(kv.currConfig) != nil {
+		return
+	}
+	// DPrintf("kuaizhao.............")
+	kv.rf.Snapshot(commandIndex, w.Bytes())
+}
+
+func (kv *ShardKV) readSnapShot(snapshot []byte) {
+	// kv.mu.Lock()
+	// defer kv.mu.Unlock()
+	if snapshot == nil || len(snapshot) < 1 {
+		return
+	}
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	var shards map[int]*Shard
+	var lastConfig, currConfig shardctrler.Config
+	// var clientMaxSeq map[int64]CommandContext
+	if d.Decode(&shards) != nil || d.Decode(&lastConfig) != nil || d.Decode(&currConfig) != nil {
+		DPrintf("安装日志失败")
+	} else {
+		kv.shards = shards
+		kv.lastConfig = lastConfig
+		kv.currConfig = currConfig
+		// kv.clientMaxSeq = clientMaxSeq
+	}
 }
 
 /**********Empty Entry Check *************/
@@ -691,9 +725,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.ctrlers = ctrlers
 
 	// Your initialization code here.
-	kv.clientMaxSeq = make(map[int64]CommandContext)
+	kv.dead = 0
+	kv.applyCh = make(chan raft.ApplyMsg, 5)
 	kv.replyChMap = make(map[int]chan ApplyNotifyMsg)
-	kv.DB = make(map[string]string)
 	kv.shards = make(map[int]*Shard)
 	kv.sc = shardctrler.MakeClerk(ctrlers)
 	kv.lastIncludedIndex = 0
@@ -704,7 +738,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.applyCh = make(chan raft.ApplyMsg, 5)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	kv.readSnapShot(kv.rf.GetSnapShot())
+	// kv.readSnapShot(kv.rf.GetSnapShot())
+	kv.readSnapShot(persister.ReadSnapshot())
 	// You may need initialization code here.
 	go kv.applier()
 	go kv.snapshoter()

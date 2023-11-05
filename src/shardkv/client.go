@@ -78,7 +78,7 @@ func (ck *Clerk) Get(key string) string {
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
-		DPrintf("Get shard:%v,gid:%v", shard, gid)
+		// DPrintf("Get shard:%v,gid:%v", shard, gid)
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
@@ -100,6 +100,7 @@ func (ck *Clerk) Get(key string) string {
 		time.Sleep(100 * time.Millisecond)
 		// ask controler for the latest configuration.
 		ck.config = ck.sm.Query(-1)
+		DPrintf("ck.config:%v", ck.config)
 	}
 
 	return ""
