@@ -13,9 +13,9 @@ import (
 	"6.5840/shardctrler"
 )
 
-// const Debug = false
+const Debug = false
 
-const Debug = true
+// const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -341,22 +341,23 @@ func (kv *ShardKV) applyCommand(applyMsg raft.ApplyMsg) {
 	command := applyMsg.Command.(Command)
 	index := applyMsg.CommandIndex
 	replyMsg := ApplyNotifyMsg{}
+	term := applyMsg.CommandTerm
 	if applyMsg.CommandIndex <= kv.lastIncludedIndex {
 		return
 	}
 	switch command.CmdType {
 	case DeleteShards:
 		deleteShardsInfo := command.Data.(DeleteShardArgs)
-		replyMsg = *kv.applyDeleteShards(&deleteShardsInfo)
+		replyMsg = *kv.applyDeleteShards(&deleteShardsInfo, term)
 	case InsertShards:
 		insertShardsInfo := command.Data.(PullShardReply)
-		replyMsg = *kv.applyInsertShards(&insertShardsInfo)
+		replyMsg = *kv.applyInsertShards(&insertShardsInfo, term)
 	case Configuration:
 		nextConfig := command.Data.(shardctrler.Config)
 		// DPrintf("G%+v {S%+v},applyCommand:nextConfig:%v", kv.gid, kv.me, nextConfig)
-		replyMsg = *kv.applyConfiguration(&nextConfig)
+		replyMsg = *kv.applyConfiguration(&nextConfig, term)
 	case EmptyEntry:
-		replyMsg = *kv.applyEmptyEntry()
+		replyMsg = *kv.applyEmptyEntry(term)
 	default:
 		op := command.Data.(Op)
 		shardId := key2shard(op.Key)
@@ -438,14 +439,14 @@ func (kv *ShardKV) configurationAction() {
 	}
 }
 
-func (kv *ShardKV) applyConfiguration(nextConfig *shardctrler.Config) *ApplyNotifyMsg {
+func (kv *ShardKV) applyConfiguration(nextConfig *shardctrler.Config, term int) *ApplyNotifyMsg {
 	if nextConfig.Num == kv.currConfig.Num+1 {
 		kv.updateShardStatus(nextConfig)
 		kv.lastConfig = shardctrler.Config{Num: kv.currConfig.Num, Shards: kv.currConfig.Shards, Groups: shardctrler.DeepCopy(kv.currConfig.Groups)}
 		kv.currConfig = shardctrler.Config{Num: nextConfig.Num, Shards: nextConfig.Shards, Groups: shardctrler.DeepCopy(nextConfig.Groups)}
-		return &ApplyNotifyMsg{Err: OK, Value: ""}
+		return &ApplyNotifyMsg{Err: OK, Value: "", Term: term}
 	}
-	return &ApplyNotifyMsg{Err: ErrOutDated, Value: ""}
+	return &ApplyNotifyMsg{Err: ErrOutDated, Value: "", Term: term}
 }
 
 // 根据新配置修改分片状态
@@ -525,7 +526,7 @@ func (kv *ShardKV) PullShardsData(args *PullShardArgs, reply *PullShardReply) {
 	kv.mu.Unlock()
 	DPrintf("G%+v {S%+v} PullShardsData: args: %+v reply: %+v", kv.gid, kv.me, args, reply)
 }
-func (kv *ShardKV) applyInsertShards(insertShardsInfo *PullShardReply) *ApplyNotifyMsg {
+func (kv *ShardKV) applyInsertShards(insertShardsInfo *PullShardReply, term int) *ApplyNotifyMsg {
 	if insertShardsInfo.ConfigNum == kv.currConfig.Num {
 		for shardId, shardData := range insertShardsInfo.Shards {
 			if kv.shards[shardId].Status == Pulling {
@@ -536,9 +537,9 @@ func (kv *ShardKV) applyInsertShards(insertShardsInfo *PullShardReply) *ApplyNot
 				break
 			}
 		}
-		return &ApplyNotifyMsg{Err: OK, Value: ""}
+		return &ApplyNotifyMsg{Err: OK, Value: "", Term: term}
 	}
-	return &ApplyNotifyMsg{Err: ErrOutDated, Value: ""}
+	return &ApplyNotifyMsg{Err: ErrOutDated, Value: "", Term: term}
 }
 
 /**********Shard Garbage Collection*************/
@@ -591,7 +592,7 @@ func (kv *ShardKV) DeleteShardsData(args *DeleteShardArgs, reply *DeleteShardRep
 		DPrintf("G%+v {S%+v} DeleteShardsData:isLeader:%v, args: %+v reply: %+v", kv.gid, kv.me, isLeader, args, reply)
 	}
 }
-func (kv *ShardKV) applyDeleteShards(deleteShardsInfo *DeleteShardArgs) *ApplyNotifyMsg {
+func (kv *ShardKV) applyDeleteShards(deleteShardsInfo *DeleteShardArgs, term int) *ApplyNotifyMsg {
 	if kv.gid == 102 && kv.me == 0 {
 		for shardId, shard := range kv.shards {
 			DPrintf("G%+v {S%+v} applyDeleteShards: kv.shards[%d]:%v,deleteShardsInfo:%v", kv.gid, kv.me, shardId, shard.Status, deleteShardsInfo)
@@ -608,9 +609,9 @@ func (kv *ShardKV) applyDeleteShards(deleteShardsInfo *DeleteShardArgs) *ApplyNo
 				break
 			}
 		}
-		return &ApplyNotifyMsg{Err: OK, Value: ""}
+		return &ApplyNotifyMsg{Err: OK, Value: "", Term: term}
 	}
-	return &ApplyNotifyMsg{Err: OK, Value: ""}
+	return &ApplyNotifyMsg{Err: OK, Value: "", Term: term}
 }
 
 /**********SnapShot*************/
@@ -633,7 +634,7 @@ func (kv *ShardKV) isNeedSnapShot() bool {
 	}
 	if kv.maxraftstate != -1 {
 		threshold := int(0.8 * float32(kv.maxraftstate))
-		if kv.maxraftstate != -1 && kv.rf.GetStateSize() > threshold || kv.lastIncludedIndex > kv.lastSnapshot+3 {
+		if kv.rf.GetStateSize() > threshold || kv.lastIncludedIndex > kv.lastSnapshot+15 {
 			return true
 		}
 	}
@@ -677,8 +678,8 @@ func (kv *ShardKV) checkEntryInCurrentTermAction() {
 		kv.Execute(command, &ApplyNotifyMsg{})
 	}
 }
-func (kv *ShardKV) applyEmptyEntry() *ApplyNotifyMsg {
-	return &ApplyNotifyMsg{Err: OK, Value: ""}
+func (kv *ShardKV) applyEmptyEntry(term int) *ApplyNotifyMsg {
+	return &ApplyNotifyMsg{Err: OK, Value: "", Term: term}
 }
 
 // servers[] contains the ports of the servers in this group.

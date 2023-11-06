@@ -199,6 +199,18 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	case <-time.After(500 * time.Millisecond):
 		reply.Err = ErrTimeout
 	}
+	go sc.CloseChan(index)
+}
+
+func (sc *ShardCtrler) CloseChan(index int) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	ch, ok := sc.replyChMap[index]
+	if !ok {
+		return
+	}
+	close(ch)
+	delete(sc.replyChMap, index)
 }
 
 // the tester calls Kill() when a ShardCtrler instance won't

@@ -106,6 +106,7 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	var term int
 	var isleader bool
+	isleader = false
 	// Your code here (2A).
 	term = rf.currentTerm
 	if rf.role == LEADER {
